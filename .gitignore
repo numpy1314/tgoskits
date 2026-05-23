@@ -58,3 +58,4 @@ __pycache__/
 .image.toml
 os/StarryOS-REF
 .Ds_Store
+loongarch64-axvisor-guest-tests.md
