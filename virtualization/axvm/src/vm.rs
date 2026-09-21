@@ -1069,8 +1069,7 @@ impl AxVM {
         flags: MappingFlags,
     ) -> AxResult {
         let mut address_space = self.inner_mut.lock();
-        let mut mapped = 0usize;
-        for &(gpa, hpa) in regions {
+        for (mapped, &(gpa, hpa)) in regions.iter().enumerate() {
             if let Err(err) = address_space
                 .address_space
                 .map_linear(gpa, hpa, size, flags)
@@ -1078,9 +1077,8 @@ impl AxVM {
                 for &(rollback_gpa, _) in &regions[..mapped] {
                     let _ = address_space.address_space.unmap(rollback_gpa, size);
                 }
-                return Err(err.into());
+                return Err(err);
             }
-            mapped += 1;
         }
         Ok(())
     }

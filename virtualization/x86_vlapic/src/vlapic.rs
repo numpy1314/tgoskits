@@ -98,6 +98,11 @@ pub struct VlapicCpuUp {
 }
 
 impl VirtualApicRegs {
+    /// Stop callbacks owned by this vLAPIC before its vCPU owner is removed.
+    pub fn shutdown(&mut self) -> AxResult {
+        self.virtual_timer.stop_timer()
+    }
+
     /// Create new virtual-APIC registers by allocating a 4-KByte page for the virtual-APIC page.
     pub fn new(vm_id: VMId, vcpu_id: VCpuId) -> Self {
         let apic_frame = PhysFrame::alloc_zero().expect("allocate virtual-APIC page failed");

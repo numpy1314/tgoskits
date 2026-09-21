@@ -245,6 +245,11 @@ pub struct VmxVcpu {
 }
 
 impl VmxVcpu {
+    /// Quiesce asynchronous vCPU-owned devices before the VMM drops ownership.
+    pub fn shutdown(&mut self) -> AxResult {
+        self.vlapic.shutdown()
+    }
+
     /// Create a new [`VmxVcpu`].
     pub fn new(vm_id: VMId, vcpu_id: VCpuId, config: X86VCpuCreateConfig) -> AxResult<Self> {
         let vmcs_revision_id = super::read_vmcs_revision_id();
@@ -1681,11 +1686,7 @@ impl VmxVcpu {
                 for i in 0..width.size() {
                     data |= (self.read_guest_u8(imm_addr + i).ok()? as u64) << (i * 8);
                 }
-                Some(AxVCpuExitReason::MmioWrite {
-                    addr,
-                    width,
-                    data,
-                })
+                Some(AxVCpuExitReason::MmioWrite { addr, width, data })
             }
             // Firecracker's boot-timer guest init writes its magic byte with
             // `movb imm8, [absolute-mmio]` (opcode C6 /0).  Decode this form

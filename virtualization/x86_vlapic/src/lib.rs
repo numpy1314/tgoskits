@@ -72,6 +72,11 @@ impl EmulatedLocalApic {
         }
     }
 
+    /// Stop callbacks owned by this local APIC before its vCPU owner is removed.
+    pub fn shutdown(&self) -> AxResult {
+        self.get_mut_vlapic_regs().shutdown()
+    }
+
     fn get_vlapic_regs(&self) -> &VirtualApicRegs {
         unsafe { &*self.vlapic_regs.get() }
     }

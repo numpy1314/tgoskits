@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::format;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::{format, vec::Vec};
 
 use axvisor_api::{
     host,
@@ -73,6 +72,8 @@ pub fn run_static_mode() {
     }
 
     run_static_vmm();
+    vmm::shutdown_static_mode();
+    disable_virtualization_on_all_cores();
 }
 
 fn init_runtime() -> ax_errno::AxResult {
@@ -127,16 +128,15 @@ fn ensure_hardware_support() {
 }
 
 fn enable_virtualization_on_all_cores() {
-    static CORES: AtomicUsize = AtomicUsize::new(0);
-
     info!("Enabling hardware virtualization support on all cores...");
 
     crate::arch::hardware_check();
 
     let cpu_count = host::get_host_cpu_num();
 
+    let mut tasks = Vec::with_capacity(cpu_count);
     for cpu_id in 0..cpu_count {
-        task::spawn_task(
+        tasks.push(task::spawn_task(
             TaskOptions {
                 name: format!("axvisor-init-cpu-{cpu_id}"),
                 stack_size: CPU_INIT_TASK_STACK_SIZE,
@@ -162,17 +162,51 @@ fn enable_virtualization_on_all_cores() {
                     .expect("Failed to enable virtualization");
 
                 info!("Hardware virtualization support enabled on core {cpu_id}");
-
-                let _ = CORES.fetch_add(1, Ordering::Release);
             },
-        );
+        ));
     }
 
     info!("Waiting for all cores to enable hardware virtualization...");
+    for task in tasks {
+        task::join_task(task);
+    }
+    info!("All cores have enabled hardware virtualization support.");
+}
 
-    while CORES.load(Ordering::Acquire) != cpu_count {
-        axvisor_api::task::yield_now();
+fn disable_virtualization_on_all_cores() {
+    info!("Disabling hardware virtualization support on all cores...");
+
+    let cpu_count = host::get_host_cpu_num();
+    let mut tasks = Vec::with_capacity(cpu_count);
+    for cpu_id in 0..cpu_count {
+        tasks.push(task::spawn_task(
+            TaskOptions {
+                name: format!("axvisor-exit-cpu-{cpu_id}"),
+                stack_size: CPU_INIT_TASK_STACK_SIZE,
+                cpu_set: Some(1usize << cpu_id),
+            },
+            move || {
+                host::init_percpu();
+                info!("Disabling hardware virtualization support on core {cpu_id}");
+
+                // SAFETY: This closure is pinned to the target CPU and runs
+                // after every vCPU task has been joined.
+                #[allow(static_mut_refs)]
+                let percpu = unsafe { AXVM_PER_CPU.current_ref_mut_raw() };
+                if percpu.is_enabled() {
+                    percpu
+                        .hardware_disable()
+                        .expect("Failed to disable virtualization");
+                }
+
+                info!("Hardware virtualization support disabled on core {cpu_id}");
+            },
+        ));
     }
 
-    info!("All cores have enabled hardware virtualization support.");
+    for task in tasks {
+        task::join_task(task);
+    }
+
+    info!("All cores have disabled hardware virtualization support.");
 }

@@ -249,6 +249,11 @@ pub struct SvmVcpu {
 }
 
 impl SvmVcpu {
+    /// Quiesce asynchronous vCPU-owned devices before the VMM drops ownership.
+    pub fn shutdown(&mut self) -> AxResult {
+        self.vlapic.shutdown()
+    }
+
     fn create(vm_id: VMId, vcpu_id: VCpuId, config: X86VCpuCreateConfig) -> AxResult<Self> {
         let vcpu = Self {
             guest_regs: GeneralRegisters::default(),
@@ -355,11 +360,23 @@ impl SvmVcpu {
         control
             .tlb_control
             .modify(VmcbTlbControl::CONTROL::FlushGuestTlb);
-        control.intercept_cr.modify(
-            InterceptCrRw::WRITE_CR0::SET
-                + InterceptCrRw::WRITE_CR3::SET
-                + InterceptCrRw::WRITE_CR4::SET,
-        );
+        // EXITINFO1 contains the MOV-to-CR source GPR only when DecodeAssist
+        // is present.  Without it, intercepting these writes would require a
+        // full instruction decoder; architectural execution is both simpler
+        // and correct.  Guest CPUID hides the optional CR4 features that this
+        // backend cannot expose safely.
+        let has_decode_assists = raw_cpuid::CpuId::new()
+            .get_svm_info()
+            .is_some_and(|features| features.has_decode_assists());
+        if has_decode_assists {
+            control.intercept_cr.modify(
+                InterceptCrRw::WRITE_CR0::SET
+                    + InterceptCrRw::WRITE_CR3::SET
+                    + InterceptCrRw::WRITE_CR4::SET,
+            );
+        } else {
+            warn!("SVM DecodeAssist unavailable; using architectural CR writes");
+        }
         control
             .intercept_exceptions
             .modify(InterceptExceptions::UD::SET);
@@ -1106,11 +1123,15 @@ impl SvmVcpu {
         let width = AccessWidth::try_from(info.get_bits(4..7) as usize)
             .map_err(|_| ax_err_type!(InvalidData, "invalid SVM IOIO access width"))?;
         let port = Port(info.get_bits(16..32) as u16);
-        let address_size = match info.get_bits(7..10) {
-            1 => 16,
-            2 => 32,
-            4 => 64,
-            _ => return ax_err!(InvalidData, "invalid SVM IOIO address size"),
+        let address_size = if is_string {
+            match info.get_bits(7..10) {
+                1 => 16,
+                2 => 32,
+                4 => 64,
+                _ => return ax_err!(InvalidData, "invalid SVM IOIO address size"),
+            }
+        } else {
+            0
         };
         Ok((is_in, is_string, is_repeat, width, port, address_size))
     }
@@ -1302,13 +1323,14 @@ impl SvmVcpu {
         let mut rip = start;
         let mut rex = 0u8;
         let mut address_override = false;
-        let operand_override = match self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
-            Ok(value) => value,
-            Err(err) => {
-                debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
-                return Ok(None);
-            }
-        };
+        let operand_override =
+            match self.skip_simple_prefixes(&mut rip, &mut rex, &mut address_override) {
+                Ok(value) => value,
+                Err(err) => {
+                    debug!("failed to decode SVM NPF MMIO prefixes: {err:?}");
+                    return Ok(None);
+                }
+            };
 
         let opcode = self.read_guest_u8(rip)?;
         rip += 1;
@@ -1318,7 +1340,11 @@ impl SvmVcpu {
             let exit = if write {
                 self.handle_decoded_npt_mmio_write(
                     addr,
-                    if operand_override { self.guest_regs.rax as u16 as u64 } else { self.guest_regs.rax as u32 as u64 },
+                    if operand_override {
+                        self.guest_regs.rax as u16 as u64
+                    } else {
+                        self.guest_regs.rax as u32 as u64
+                    },
                     local_apic,
                 )?
             } else if local_apic {
@@ -1333,7 +1359,11 @@ impl SvmVcpu {
             } else {
                 AxVCpuExitReason::MmioRead {
                     addr,
-                    width: if operand_override { AccessWidth::Word } else { AccessWidth::Dword },
+                    width: if operand_override {
+                        AccessWidth::Word
+                    } else {
+                        AccessWidth::Dword
+                    },
                     reg: 0,
                     reg_width: AccessWidth::Dword,
                     signed_ext: false,
@@ -1393,12 +1423,16 @@ impl SvmVcpu {
             }
             (true, 0xc7, None) if (modrm >> 3) & 0x7 == 0 => {
                 let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex)?;
-                let width = if operand_override { AccessWidth::Word } else { AccessWidth::Dword };
+                let width = if operand_override {
+                    AccessWidth::Word
+                } else {
+                    AccessWidth::Dword
+                };
                 let mut data = 0u64;
                 for i in 0..width.size() {
                     data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
                 }
-                let exit = self.handle_decoded_npt_mmio_write(addr, data as u64, local_apic)?;
+                let exit = self.handle_decoded_npt_mmio_write(addr, data, local_apic)?;
                 Ok(Some((
                     exit,
                     (imm_addr.as_usize() + width.size() - start.as_usize()) as u8,
@@ -1421,8 +1455,7 @@ impl SvmVcpu {
                             addr,
                             width,
                         )?;
-                    self.regs_mut()
-                        .set_reg_of_index(reg as u8, val as u64);
+                    self.regs_mut().set_reg_of_index(reg as u8, val as u64);
                     AxVCpuExitReason::Nothing
                 } else {
                     AxVCpuExitReason::MmioRead {

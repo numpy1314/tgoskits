@@ -93,6 +93,13 @@ pub fn start() {
     });
 }
 
+/// Join and release every static VM's vCPU host tasks after all VMs stop.
+pub fn shutdown_static_mode() {
+    for vm in vm_list::get_vm_list() {
+        vcpus::cleanup_vm_vcpus(vm.id());
+    }
+}
+
 #[allow(unused_imports)]
 pub use vcpus::with_vcpu_task;
 

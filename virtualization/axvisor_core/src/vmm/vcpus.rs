@@ -412,6 +412,7 @@ pub fn setup_vm_primary_vcpu(vm: VMRef) {
         return;
     }
     let vm_vcpus = Arc::new(VMVCpus::new(vm.clone()));
+    VM_VCPU_TASKS.lock().insert(vm_id, vm_vcpus.clone());
 
     let primary_vcpu_id = 0;
 
@@ -421,8 +422,6 @@ pub fn setup_vm_primary_vcpu(vm: VMRef) {
     };
     let (primary_vcpu_task, task_name) = alloc_vcpu_task(&vm, primary_vcpu);
     vm_vcpus.add_vcpu_task(0, primary_vcpu_task, task_name);
-
-    VM_VCPU_TASKS.lock().insert(vm_id, vm_vcpus);
 }
 
 /// Finds the task associated with the specified vCPU of the specified VM.
@@ -661,6 +660,11 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
                 "VM[{}] VCpu[{}] stopping because of VM stopping",
                 vm_id, vcpu_id
             );
+
+            #[cfg(target_arch = "x86_64")]
+            if let Err(err) = vcpu.get_arch_vcpu().shutdown() {
+                warn!("VM[{vm_id}] VCpu[{vcpu_id}] failed to quiesce: {err:?}");
+            }
 
             if mark_vcpu_exiting(vm_id) {
                 info!("VM[{vm_id}] VCpu[{vcpu_id}] last VCpu exiting, decreasing running VM count");

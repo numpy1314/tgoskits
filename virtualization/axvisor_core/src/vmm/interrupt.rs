@@ -110,6 +110,10 @@ fn target_matches(target: VcpuInterruptTarget, vm: &VMRef, vcpu_id: usize) -> bo
 /// immediately. Otherwise it is queued to the static vCPU task model, falling
 /// back to the KVM host-control vCPU fd model when the VM is control-owned.
 pub(crate) fn deliver_interrupt(route: InterruptRoute) {
+    if vmm::with_vm(route.vm_id, |vm| !vm.stopping() && !vm.stopped()) != Some(true) {
+        return;
+    }
+
     if let Some(context) = crate::context::try_current_vcpu_context()
         && context.vm_id == route.vm_id
         && context.vcpu_id == route.vcpu_id
@@ -125,6 +129,12 @@ pub(crate) fn deliver_interrupt(route: InterruptRoute) {
     }
 
     if !queue_control_interrupt(route) {
+        // The VM may have crossed its close boundary between the first status
+        // check and removal of its vCPU queues. Late device events are dropped.
+        if vmm::with_vm(route.vm_id, |vm| !vm.stopping() && !vm.stopped()) != Some(true) {
+            return;
+        }
+
         #[cfg(not(feature = "control"))]
         warn!(
             "Failed to queue interrupt {:?} to VM[{}] VCpu[{}]: VM vCPU resources not found",
