@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(not(feature = "arm-vhe"))]
 use aarch64_cpu_ext::registers::*;
 use ax_memory_addr::VirtAddr;
 
@@ -23,6 +24,13 @@ pub(crate) fn clean_dcache_range(addr: VirtAddr, size: usize) {
     );
 }
 
+#[cfg(feature = "arm-vhe")]
+pub fn hardware_check() {
+    // The hosted VHE profile selects a 48-bit IPA independently of PA width.
+    // Runtime ownership and granule checks belong to the host admission path.
+}
+
+#[cfg(not(feature = "arm-vhe"))]
 pub fn hardware_check() {
     let pa_bits = match ID_AA64MMFR0_EL1.read_as_enum(ID_AA64MMFR0_EL1::PARange) {
         Some(ID_AA64MMFR0_EL1::PARange::Value::Bits_32) => 32,

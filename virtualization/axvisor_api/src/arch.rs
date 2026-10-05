@@ -54,6 +54,16 @@ use super::memory::PhysAddr;
 /// host system or HAL layer.
 #[crate::api_def]
 pub trait ArchIf {
+    /// Pin the current CPU, acquire the host FP state and mask exceptions.
+    /// Failure must leave the host unchanged. The token must be released on
+    /// the same CPU, after all guest architectural state has been removed.
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn vhe_host_enter() -> ax_errno::AxResult<usize>;
+
+    /// Restore host exception state and release the CPU/FP ownership token.
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn vhe_host_exit(token: usize);
+
     /// Returns the physical address of the host-provided FDT blob, if any.
     #[cfg(any(
         target_arch = "aarch64",

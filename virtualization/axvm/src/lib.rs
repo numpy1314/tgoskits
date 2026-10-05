@@ -38,3 +38,9 @@ pub type AxVMPerCpu = axvcpu::AxPerCpu<vcpu::AxVMArchPerCpuImpl>;
 pub fn has_hardware_support() -> bool {
     vcpu::has_hardware_support()
 }
+
+/// Maximum IPA width for the hosted VHE profile admitted by the host.
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub fn arm_ipa_bits() -> usize {
+    arm_vcpu::vhe::ipa_bits()
+}

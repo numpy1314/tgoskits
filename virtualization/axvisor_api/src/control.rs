@@ -92,6 +92,15 @@ pub trait ControlIf {
         mmap_area: Option<MmapAreaId>,
     ) -> AxResult<Fd>;
 
+    /// Creates an fd and copies its number to user memory before publication.
+    /// On any failure no fd is installed and Core retains `control_file`.
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn create_user_fd_at(
+        control_file: ControlFileId,
+        ops: ControlOps,
+        user_address: usize,
+    ) -> AxResult;
+
     /// Retains a userspace file descriptor from the current userspace task.
     ///
     /// The host may implement this by capturing the kernel object referenced by

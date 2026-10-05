@@ -14,6 +14,7 @@ version = "0.5.11"
 license = "Apache-2.0"
 
 [features]
+arm-vhe = ["arm-el2"]
 arm-el2 = ["ax-page-table-entry/arm-el2"]
 default = ["arm-el2"]
 svm = []

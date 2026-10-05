@@ -1,4 +1,7 @@
-#[cfg(all(feature = "external-base", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "external-base",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 unsafe extern "C" {
     /// Resolve the per-CPU area for the currently running host CPU.
     ///
@@ -34,6 +37,8 @@ pub fn read_percpu_reg() -> usize {
                         unimplemented!()
                     }
                 }
+            } else if #[cfg(all(target_arch = "aarch64", feature = "external-base"))] {
+                tp = ax_percpu_current_base();
             } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
                 core::arch::asm!("mv {}, gp", out(reg) tp)
             } else if #[cfg(all(target_arch = "aarch64", not(feature = "arm-el2")))] {
@@ -57,6 +62,20 @@ pub fn read_percpu_reg() -> usize {
 /// # Safety
 ///
 /// This function is unsafe because it writes the low-level register directly.
+#[cfg(all(
+    feature = "external-base",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub unsafe fn write_percpu_reg(_tp: usize) {}
+
+/// Writes the native per-CPU register when the host does not own its base.
+///
+/// # Safety
+/// The caller must own the per-CPU register and provide valid backing memory.
+#[cfg(not(all(
+    feature = "external-base",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 pub unsafe fn write_percpu_reg(tp: usize) {
     unsafe {
         cfg_if::cfg_if! {
@@ -84,6 +103,9 @@ pub unsafe fn write_percpu_reg(tp: usize) {
                     }
                     SELF_PTR.write_current_raw(tp);
                 }
+            } else if #[cfg(all(target_arch = "aarch64", feature = "external-base"))] {
+                // TPIDR_EL1/EL2 belong to the host kernel.
+                let _ = tp;
             } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
                 core::arch::asm!("mv gp, {}", in(reg) tp)
             } else if #[cfg(all(target_arch = "aarch64", not(feature = "arm-el2")))] {

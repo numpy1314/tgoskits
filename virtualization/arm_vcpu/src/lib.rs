@@ -18,39 +18,65 @@
 
 #[macro_use]
 extern crate log;
+#[cfg(feature = "vhe")]
+extern crate alloc;
 
 mod context_frame;
 #[macro_use]
 mod exception_utils;
 mod exception;
+#[cfg(not(feature = "vhe"))]
 mod pcpu;
 mod smc;
 mod vcpu;
 
+#[cfg(feature = "vhe")]
+pub mod vhe;
+#[cfg(feature = "vhe")]
+mod vhe_regs;
+#[cfg(feature = "vhe")]
+mod vhe_stage2;
+#[cfg(feature = "vhe-selftest")]
+pub mod vhe_test;
+
+#[cfg(not(feature = "vhe"))]
 pub use self::{
     pcpu::Aarch64PerCpu,
     vcpu::{Aarch64VCpu, Aarch64VCpuCreateConfig, Aarch64VCpuSetupConfig},
+};
+#[cfg(feature = "vhe")]
+pub use self::{
+    vcpu::{Aarch64VCpuCreateConfig, Aarch64VCpuSetupConfig},
+    vhe::{PerCpu as Aarch64PerCpu, Vcpu as Aarch64VCpu},
 };
 
 /// context frame for aarch64
 pub type TrapFrame = context_frame::Aarch64ContextFrame;
 
-/// Returns the maximum guest page table levels supported by the hardware.
+/// Returns the page table depth used by the shared address-space manager.
 ///
-/// This is determined by the physical address size:
+/// Hosted VHE uses a four-level software tree and, where required, a
+/// concatenated hardware L1 root. The standalone backend selects by PA size:
 /// - 44+ bit PA → 4 levels (48-bit IPA)
 /// - < 44 bit PA → 3 levels (39-bit IPA)
 pub fn max_guest_page_table_levels() -> usize {
+    #[cfg(feature = "vhe")]
+    return 4;
+    #[cfg(not(feature = "vhe"))]
     vcpu::max_gpt_level(vcpu::pa_bits())
 }
 
 /// Return if current platform support virtualization extension.
 pub fn has_hardware_support() -> bool {
-    // Hint:
-    // In Cortex-A78, we can use
-    // [ID_AA64MMFR1_EL1](https://developer.arm.com/documentation/101430/0102/Register-descriptions/AArch64-system-registers/ID-AA64MMFR1-EL1--AArch64-Memory-Model-Feature-Register-1--EL1)
-    // to get whether Virtualization Host Extensions is supported.
-
-    // Current just return true by default.
+    #[cfg(feature = "vhe")]
+    {
+        let el: u64;
+        let mmfr1: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, CurrentEL", "mrs {}, id_aa64mmfr1_el1", out(reg) el, out(reg) mmfr1);
+        }
+        el == 8 && (mmfr1 >> 8) & 15 == 1
+    }
+    #[cfg(not(feature = "vhe"))]
     true
 }

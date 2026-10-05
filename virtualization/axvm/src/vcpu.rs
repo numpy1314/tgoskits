@@ -137,6 +137,7 @@ cfg_if::cfg_if! {
         pub use arm_vcpu::has_hardware_support;
         pub use arm_vcpu::max_guest_page_table_levels;
 
+        #[cfg(not(feature = "arm-vhe"))]
         pub use arm_vgic::vtimer::get_sysreg_device;
     }
 }

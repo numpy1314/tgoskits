@@ -30,7 +30,7 @@ use vm_interrupt::{InterruptControllerRoute, InterruptLineLevel, VmInterruptRout
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]
 use x86_vcpu::{X86_APIC_ACCESS_GPA, x86_apic_access_page_addr};
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "arm-vhe")))]
 use crate::vcpu::get_sysreg_device;
 use crate::{
     config::{AxVMConfig, PhysCpuList, VMInterruptMode},
@@ -40,9 +40,15 @@ use crate::{
 };
 
 const VM_ASPACE_BASE: usize = 0x0;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "arm-vhe")
+))]
 const VM_ASPACE_SIZE: usize = 1 << 48;
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "arm-vhe")
+)))]
 const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
 
 /// A vCPU with architecture-independent interface.
@@ -374,8 +380,7 @@ impl AxVM {
             }
         }
 
-        #[cfg_attr(not(target_arch = "aarch64"), expect(unused_mut))]
-        let mut devices = axdevice::AxVmDevices::new(AxVmDeviceConfig {
+        let devices = axdevice::AxVmDevices::new(AxVmDeviceConfig {
             interrupt_router: Some(Arc::new(AxVmInterruptRouter { vm_id: self.id() })),
             guest_cpu_topology: inner_mut
                 .config
@@ -386,7 +391,9 @@ impl AxVM {
             emu_configs: inner_mut.config.emu_devices().to_vec(),
         });
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(feature = "arm-vhe")))]
+        let mut devices = devices;
+        #[cfg(all(target_arch = "aarch64", not(feature = "arm-vhe")))]
         {
             let passthrough =
                 inner_mut.config.interrupt_mode() == axvmconfig::VMInterruptMode::Passthrough;
@@ -622,6 +629,17 @@ impl AxVM {
 
     #[cfg(not(feature = "svm"))]
     fn with_bound_vcpu<T>(vcpu: &AxVCpuRef, f: impl FnOnce() -> AxResult<T>) -> AxResult<T> {
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        struct HostToken(usize);
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        impl Drop for HostToken {
+            fn drop(&mut self) {
+                axvisor_api::arch::vhe_host_exit(self.0);
+            }
+        }
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        let _guard = HostToken(axvisor_api::arch::vhe_host_enter()?);
+        #[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
         let _guard = ax_kernel_guard::IrqSave::new();
         vcpu.bind()?;
         let result = f();

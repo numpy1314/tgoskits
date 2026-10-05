@@ -30,6 +30,7 @@ ax-cpumask = { workspace = true }
 [features]
 default = ["shell"]
 control = []
+arm-vhe = []
 fs = []
 shell = []
 

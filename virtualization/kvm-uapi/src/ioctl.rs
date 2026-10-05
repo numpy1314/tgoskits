@@ -38,6 +38,12 @@ pub mod public {
     pub const KVM_GET_SUPPORTED_CPUID: u32 = iowr(KVMIO, 0x05, KVM_CPUID2_SIZE);
     /// Creates a vCPU fd on a VM fd.
     pub const KVM_CREATE_VCPU: u32 = ioc(KVMIO, 0x41);
+    pub const KVM_ARM_VCPU_INIT: u32 = iow(KVMIO, 0xae, 32);
+    pub const KVM_ARM_PREFERRED_TARGET: u32 = ior(KVMIO, 0xaf, 32);
+    pub const KVM_CREATE_DEVICE: u32 = iowr(KVMIO, 0xe0, 12);
+    pub const KVM_SET_DEVICE_ATTR: u32 = iow(KVMIO, 0xe1, 24);
+    pub const KVM_GET_DEVICE_ATTR: u32 = iow(KVMIO, 0xe2, 24);
+    pub const KVM_HAS_DEVICE_ATTR: u32 = iow(KVMIO, 0xe3, 24);
     /// Configures one userspace-backed guest memory slot on a VM fd.
     pub const KVM_SET_USER_MEMORY_REGION: u32 = iow(KVMIO, 0x46, KVM_USERSPACE_MEMORY_REGION_SIZE);
     /// Sets the x86 TSS address.
@@ -170,14 +176,25 @@ pub mod public {
     pub const KVM_CAP_IOEVENTFD_ANY_LENGTH: usize = 122;
     pub const KVM_CAP_IMMEDIATE_EXIT: usize = 136;
     pub const KVM_CAP_XSAVE2: usize = 208;
+    pub const KVM_CAP_DEVICE_CTRL: usize = 89;
+    pub const KVM_CAP_ARM_PSCI_0_2: usize = 102;
+    pub const KVM_CAP_ARM_VM_IPA_SIZE: usize = 165;
 }
 
 // Linux reserves ioctl type 0xae for KVM.
 pub const KVMIO: u32 = 0xae;
 
-#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
+#[cfg(any(
+    target_arch = "riscv64",
+    target_arch = "x86_64",
+    target_arch = "aarch64"
+))]
 pub const KVM_MAX_VCPUS: usize = 8;
-#[cfg(not(any(target_arch = "riscv64", target_arch = "x86_64")))]
+#[cfg(not(any(
+    target_arch = "riscv64",
+    target_arch = "x86_64",
+    target_arch = "aarch64"
+)))]
 pub const KVM_MAX_VCPUS: usize = 1;
 /// Maximum number of userspace memory slots supported by one VM.
 ///

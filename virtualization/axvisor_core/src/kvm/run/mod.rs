@@ -47,6 +47,8 @@ use crate::{
 };
 
 pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) -> AxResult<isize> {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    super::arm::check_initialized(control_file)?;
     let (
         vm,
         vm_file,
@@ -100,6 +102,14 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     #[cfg(not(target_arch = "x86_64"))]
     let _ = (vm_file, irqchip_created, pit2_created);
 
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    let memory_gate = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(state)) = files.get(&vm_file) else {
+            return ax_err!(NotFound);
+        };
+        state.memory_gate.clone()
+    };
     let _context_guard = crate::context::bind_current_vcpu_context(vm.id(), vcpu_id);
 
     // `exit_reason` is only meaningful when KVM_RUN returns successfully. Do
@@ -115,6 +125,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         wait_until_vcpu_runnable(control_file, &vcpu, &signal_mask)?;
     }
 
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    super::memory::prepare_arm_execution(vm_file)?;
     if !vm.running() {
         let boot_result = vm.boot();
         // Multiple userspace-managed vCPUs may issue their first KVM_RUN
@@ -159,6 +171,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             break abi::KVM_EXIT_IRQ_WINDOW_OPEN;
         }
 
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        let _memory_guard = memory_gate.read();
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        super::arm::feed(vm_file, vcpu_id, &vcpu)?;
         let exit_reason = match vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
             #[cfg(target_arch = "x86_64")]
             {
@@ -187,6 +203,10 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             continue;
         }
 
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        if super::arm::exit(vm_file, vcpu_id, &vcpu, &exit_reason)? {
+            continue;
+        }
         match exit_reason {
             AxVCpuExitReason::Nothing => {}
             AxVCpuExitReason::PreemptionTimer
@@ -324,6 +344,8 @@ fn wait_until_vcpu_runnable(
                 set_current_vcpu_mp_state(control_file, abi::KVM_MP_STATE_RUNNABLE)?;
             }
         }
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        super::arm::consume_startup(control_file, vcpu)?;
         #[cfg(not(all(target_arch = "x86_64", feature = "vmx")))]
         let _ = vcpu;
         if current_vcpu_mp_state(control_file)? == abi::KVM_MP_STATE_RUNNABLE {
@@ -392,11 +414,17 @@ fn vcpu_run_interrupted(
     if read_vcpu_run_u8(control_file, abi::KVM_RUN_IMMEDIATE_EXIT_OFFSET)? != 0 {
         return Ok(true);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "arm-vhe")
+    ))]
     {
         api_control::current_thread_has_pending_signal(signal_mask)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "arm-vhe")
+    )))]
     {
         let _ = signal_mask;
         Ok(false)

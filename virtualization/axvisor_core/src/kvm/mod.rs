@@ -15,9 +15,15 @@
 //! AxVisor KVM-compatible host control endpoint callbacks.
 
 mod abi;
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+mod arm;
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+mod arm_gic;
 mod cpuid;
 mod eventfd;
 mod memory;
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+mod memory_gate;
 mod run;
 mod state;
 mod util;
@@ -83,8 +89,18 @@ fn open() -> AxResult<api_control::ControlFileId> {
 }
 
 fn close(control_file: api_control::ControlFileId) -> AxResult {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    {
+        let parent = match CONTROL_FILES.lock().get(&control_file) {
+            Some(ControlFileState::ArmDevice(vm_file)) => Some(*vm_file),
+            _ => None,
+        };
+        if let Some(parent) = parent {
+            return arm::close_device(control_file, parent);
+        }
+    }
     enum CloseAction {
-        Vcpu(VcpuFileState),
+        Vcpu(api_control::MmapAreaId),
         Vm {
             control_file: api_control::ControlFileId,
             irqfds: Vec<IrqFd>,
@@ -103,7 +119,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 // VM fd can be dropped before vCPU fds during process exit.
                 let has_vcpus = match control_files.get_mut(&control_file) {
                     Some(ControlFileState::Vm(vm)) => {
-                        if !vm.vcpu_files.is_empty() {
+                        if vm.has_live_children() {
                             vm.vm_fd_closed = true;
                             true
                         } else {
@@ -111,7 +127,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         }
                     }
                     _ => unreachable!(),
-                    };
+                };
                 if has_vcpus {
                     CloseAction::None
                 } else {
@@ -137,10 +153,10 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 let cleanup_vm =
                     if let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&vcpu.vm_file) {
                         vm.vcpu_files.remove(&vcpu.vcpu_id);
-                        vm.vm_fd_closed && vm.vcpu_files.is_empty()
+                        vm.vm_fd_closed && !vm.has_live_children()
                     } else {
                         false
-                };
+                    };
                 if cleanup_vm {
                     // The closing vCPU has already been removed from
                     // `vm.vcpu_files`, so the VM cleanup loop below cannot
@@ -157,9 +173,11 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                         irqfds,
                     }
                 } else {
-                    CloseAction::Vcpu(vcpu)
+                    CloseAction::Vcpu(vcpu.mmap_area)
                 }
             }
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            ControlFileState::ArmDevice(_) => unreachable!(),
             ControlFileState::System => {
                 control_files.remove(&control_file);
                 CloseAction::None
@@ -188,6 +206,7 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
             // KVM-created vCPUs are registered in the VMM task table.  Join
             // and remove them before dropping the VM so their stacks and VM
             // references do not accumulate across repeated VM lifetimes.
+            #[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
             crate::vmm::vcpus::cleanup_vm_vcpus(vm.vm.id());
             for ioeventfd in vm.ioeventfds.into_values() {
                 let _ = api_control::release_user_fd_ref(ioeventfd.user_fd_ref);
@@ -202,8 +221,8 @@ fn close(control_file: api_control::ControlFileId) -> AxResult {
                 }
             }
         }
-        CloseAction::Vcpu(vcpu) => {
-            let _ = api_control::release_mmap_area(vcpu.mmap_area);
+        CloseAction::Vcpu(mmap_area) => {
+            let _ = api_control::release_mmap_area(mmap_area);
         }
         CloseAction::None => {}
     }
@@ -350,6 +369,8 @@ fn control_file_state(control_file: api_control::ControlFileId) -> AxResult<Cont
 
 fn ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> AxResult<isize> {
     match control_file_state(control_file)? {
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        ControlFileState::ArmDevice(vm) => arm::device_ioctl(vm, cmd, arg),
         ControlFileState::System => system_ioctl(cmd, arg),
         ControlFileState::Vm(_) => vm_ioctl(control_file, cmd, arg),
         ControlFileState::Vcpu(_) => vcpu_ioctl(control_file, cmd, arg),
@@ -368,7 +389,19 @@ fn system_ioctl(cmd: u32, arg: usize) -> AxResult<isize> {
             Ok(0)
         }
         KVM_CREATE_VM => {
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            let ipa_bits = if arg == 0 {
+                40
+            } else if (32..=axvm::arm_ipa_bits()).contains(&arg) {
+                arg as u8
+            } else {
+                return ax_err!(InvalidInput);
+            };
             let vm_file = create_vm_file()?;
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            if let Some(ControlFileState::Vm(vm)) = CONTROL_FILES.lock().get_mut(&vm_file) {
+                vm.arm_ipa_bits = ipa_bits;
+            }
             match api_control::create_user_fd(vm_file, KVM_CONTROL_OPS, None) {
                 Ok(fd) => Ok(fd as isize),
                 Err(err) => {
@@ -388,6 +421,10 @@ fn vm_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) -> A
     match cmd {
         KVM_CHECK_EXTENSION => Ok(check_extension(arg) as isize),
         KVM_CREATE_VCPU => create_vcpu_file(control_file, arg),
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        KVM_ARM_PREFERRED_TARGET => arm::preferred_target(arg),
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        KVM_CREATE_DEVICE => arm::create_device(control_file, arg),
         KVM_SET_USER_MEMORY_REGION => {
             let region = read_userspace_memory_region(arg)?;
             set_user_memory_region(control_file, region)?;
@@ -470,6 +507,8 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
             | KVM_SET_CPUID2
             | KVM_GET_ONE_REG
             | KVM_SET_ONE_REG
+            | KVM_ARM_VCPU_INIT
+            | KVM_GET_REG_LIST
             | KVM_GET_DEBUGREGS
             | KVM_SET_DEBUGREGS
     ) {
@@ -486,6 +525,8 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
     };
 
     match cmd {
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        KVM_ARM_VCPU_INIT => arm::init_vcpu(control_file, arg),
         KVM_RUN => run_vcpu_file(control_file),
         KVM_GET_REGS => get_kvm_regs(control_file, arg),
         KVM_SET_REGS => set_kvm_regs(control_file, arg),
@@ -546,6 +587,26 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
 }
 
 fn check_extension(capability: usize) -> usize {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    return match capability {
+        KVM_CAP_IRQCHIP
+        | KVM_CAP_IRQFD
+        | KVM_CAP_DEVICE_CTRL
+        | KVM_CAP_ARM_PSCI_0_2
+        | KVM_CAP_USER_MEMORY
+        | KVM_CAP_IOEVENTFD
+        | KVM_CAP_MP_STATE
+        | KVM_CAP_ONE_REG
+        | KVM_CAP_IMMEDIATE_EXIT
+        | KVM_CAP_IOEVENTFD_ANY_LENGTH
+        | KVM_CAP_DESTROY_MEMORY_REGION_WORKS
+        | KVM_CAP_JOIN_MEMORY_REGIONS_WORKS => 1,
+        KVM_CAP_NR_VCPUS | KVM_CAP_MAX_VCPUS => KVM_MAX_VCPUS,
+        KVM_CAP_NR_MEMSLOTS => KVM_MAX_MEMORY_SLOTS,
+        KVM_CAP_ARM_VM_IPA_SIZE => axvm::arm_ipa_bits(),
+        _ => 0,
+    };
+    #[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
     match capability {
         KVM_CAP_IRQCHIP => usize::from(cfg!(target_arch = "x86_64")),
         KVM_CAP_USER_MEMORY => 1,

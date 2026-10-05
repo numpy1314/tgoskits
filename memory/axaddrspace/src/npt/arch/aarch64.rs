@@ -89,7 +89,7 @@ impl DescriptorAttr {
 
     const fn from_mem_type(mem_type: MemType) -> Self {
         let bits = match mem_type {
-            MemType::Normal => Self::NORMAL_BIT | Self::SHAREABLE.bits(),
+            MemType::Normal => Self::NORMAL_BIT | Self::SHAREABLE.bits() | Self::INNER.bits(),
             MemType::NormalNonCache => {
                 Self::PTE_S2_MEM_ATTR_NORMAL_INNER_WRITE_BACK_CACHEABLE
                     | Self::PTE_S2_MEM_ATTR_NORMAL_OUTER_WRITE_BACK_NOCACHEABLE
@@ -114,10 +114,10 @@ impl DescriptorAttr {
 impl From<DescriptorAttr> for MappingFlags {
     fn from(attr: DescriptorAttr) -> Self {
         let mut flags = Self::empty();
-        if attr.contains(DescriptorAttr::VALID) {
+        if attr.contains(DescriptorAttr::VALID | DescriptorAttr::S2AP_RO) {
             flags |= Self::READ;
         }
-        if !attr.contains(DescriptorAttr::S2AP_WO) {
+        if attr.contains(DescriptorAttr::VALID | DescriptorAttr::S2AP_WO) {
             flags |= Self::WRITE;
         }
         if !attr.contains(DescriptorAttr::XN) {
@@ -146,6 +146,9 @@ impl From<MappingFlags> for DescriptorAttr {
         }
         if flags.contains(MappingFlags::WRITE) {
             attr |= Self::S2AP_WO;
+        }
+        if !flags.contains(MappingFlags::EXECUTE) {
+            attr |= Self::XN;
         }
         attr
     }
@@ -241,6 +244,15 @@ impl PagingMetaData for A64HVPagingMetaDataL3 {
     type VirtAddr = GuestPhysAddr;
 
     fn flush_tlb(vaddr: Option<Self::VirtAddr>) {
+        // Hosted VHE uses VMID 0 and flushes the full guest context on every
+        // entry. Its memory gate drains all current entries before mutation.
+        // Never invalidate host EL2 translations for a guest IPA.
+        #[cfg(feature = "arm-vhe")]
+        {
+            let _ = vaddr;
+            unsafe { asm!("dsb ishst") };
+        }
+        #[cfg(not(feature = "arm-vhe"))]
         unsafe {
             if let Some(vaddr) = vaddr {
                 #[cfg(not(feature = "arm-el2"))]
@@ -281,6 +293,15 @@ impl PagingMetaData for A64HVPagingMetaDataL4 {
     type VirtAddr = GuestPhysAddr;
 
     fn flush_tlb(vaddr: Option<Self::VirtAddr>) {
+        // Hosted VHE uses VMID 0 and flushes the full guest context on every
+        // entry. Its memory gate drains all current entries before mutation.
+        // Never invalidate host EL2 translations for a guest IPA.
+        #[cfg(feature = "arm-vhe")]
+        {
+            let _ = vaddr;
+            unsafe { asm!("dsb ishst") };
+        }
+        #[cfg(not(feature = "arm-vhe"))]
         unsafe {
             if let Some(vaddr) = vaddr {
                 #[cfg(not(feature = "arm-el2"))]

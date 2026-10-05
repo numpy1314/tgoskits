@@ -113,7 +113,10 @@ fn read_irq_level(arg: usize) -> AxResult<KvmIrqLevel> {
     })
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "arm-vhe")
+)))]
 pub(in crate::kvm) fn set_irq_line(
     _control_file: api_control::ControlFileId,
     _arg: usize,
@@ -391,6 +394,7 @@ fn irqfd_listener_loop(
     }
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 fn inject_irqfd_gsi(control_file: api_control::ControlFileId, gsi: u32) -> AxResult {
     let (vm, route, active_vcpu_mask) = {
         let control_files = CONTROL_FILES.lock();
@@ -477,7 +481,10 @@ fn deliver_msi(vm_id: usize, active_vcpu_mask: u64, msi: KvmMsi) -> AxResult {
     Ok(())
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "arm-vhe")
+)))]
 fn legacy_gsi_vector(gsi: u32) -> u8 {
     0x20u8.saturating_add(gsi.min(0xdf) as u8)
 }
@@ -594,4 +601,13 @@ fn ioeventfd_matches(
     }
     let mask = access_width_mask(width) as u64;
     (data & mask) == (ioeventfd.datamatch & mask)
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+fn inject_irqfd_gsi(file: u64, gsi: u32) -> AxResult {
+    super::arm::irqfd(file, gsi)
+}
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(in crate::kvm) fn set_irq_line(file: u64, arg: usize) -> AxResult<isize> {
+    super::arm::irq_line(file, arg)
 }

@@ -31,3 +31,7 @@ axaddrspace = { workspace = true }
 axdevice_base = { workspace = true }
 axvcpu = { workspace = true }
 axvisor_api = { workspace = true }
+
+[features]
+vhe = ["axvisor_api/arm-vhe"]
+vhe-selftest = ["vhe"]

@@ -44,6 +44,16 @@ pub(in crate::kvm) fn create_vm_file() -> AxResult<api_control::ControlFileId> {
     CONTROL_FILES.lock().insert(
         control_file,
         ControlFileState::Vm(VmFileState {
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            arm_ipa_bits: 40,
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            arm_cache_ready: false,
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            memory_gate: super::memory_gate::MemoryGate::new(),
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            arm_gic: alloc::sync::Arc::new(ax_kspin::SpinNoIrq::new(super::arm_gic::Gic::new())),
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            arm_devices: Vec::new(),
             vm,
             vm_fd_closed: false,
             memory_slots: BTreeMap::new(),
@@ -76,10 +86,10 @@ pub(in crate::kvm) fn create_vcpu_file(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
 ) -> AxResult<isize> {
-    let vcpu_id = vcpu_id as u32;
+    let vcpu_id = u32::try_from(vcpu_id).map_err(|_| AxError::InvalidInput)?;
     let mmap_area = api_control::create_mmap_area(abi::KVM_VCPU_MMAP_SIZE)?;
 
-    let vcpu_file = {
+    let result = (|| -> AxResult<api_control::ControlFileId> {
         let mut control_files = CONTROL_FILES.lock();
         let Some(ControlFileState::Vm(vm)) = control_files.get_mut(&control_file) else {
             return ax_err!(NotFound);
@@ -91,6 +101,10 @@ pub(in crate::kvm) fn create_vcpu_file(
             return ax_err!(AlreadyExists);
         }
 
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        if vm.arm_gic.lock().initialized {
+            return ax_err!(ResourceBusy);
+        }
         let vcpu_file = next_control_file_id()?;
         // On x86, userspace is responsible for starting every vCPU when no
         // in-kernel irqchip is present. RISC-V secondary harts must remain
@@ -111,6 +125,10 @@ pub(in crate::kvm) fn create_vcpu_file(
         control_files.insert(
             vcpu_file,
             ControlFileState::Vcpu(VcpuFileState {
+                #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+                arm_initialized: false,
+                #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+                arm_start: None,
                 vm_file: control_file,
                 vcpu_id,
                 mmap_area,
@@ -133,7 +151,14 @@ pub(in crate::kvm) fn create_vcpu_file(
                 operation_lock: VcpuOperationLock::new(),
             }),
         );
-        vcpu_file
+        Ok(vcpu_file)
+    })();
+    let vcpu_file = match result {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = api_control::release_mmap_area(mmap_area);
+            return Err(error);
+        }
     };
 
     match api_control::create_user_fd(vcpu_file, KVM_CONTROL_OPS, Some(mmap_area)) {

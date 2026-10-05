@@ -10,6 +10,7 @@ repository = "https://github.com/rcore-os/tgoskits"
 [features]
 default = ["vmx", "shell"]
 control = ["axvisor_api/control"]
+arm-vhe = ["axvm/arm-vhe", "axvisor_api/arm-vhe"]
 ept-level-4 = []
 fs = ["axvisor_api/fs"]
 shell = ["axvisor_api/shell"]

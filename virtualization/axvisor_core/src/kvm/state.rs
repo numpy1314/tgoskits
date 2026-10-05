@@ -38,10 +38,12 @@ use hashbrown::HashMap;
 type MappedPages = HashMap<u64, MappedMemoryPage>;
 #[cfg(not(target_arch = "x86_64"))]
 type MappedPages = BTreeMap<u64, MappedMemoryPage>;
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
+pub(in crate::kvm) use kvm_uapi::OneReg;
 #[cfg(target_arch = "x86_64")]
 pub(in crate::kvm) use kvm_uapi::x86::{PvClockVcpuTimeInfo, PvClockWallClock};
 pub(in crate::kvm) use kvm_uapi::{
-    KvmCpuidEntry2, KvmEnableCap, KvmIoEventFd, KvmIrqFd, OneReg, UserspaceMemoryRegion,
+    KvmCpuidEntry2, KvmEnableCap, KvmIoEventFd, KvmIrqFd, UserspaceMemoryRegion,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -53,10 +55,22 @@ pub(in crate::kvm) enum ControlFileState {
     System,
     Vm(VmFileState),
     Vcpu(VcpuFileState),
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    ArmDevice(u64),
 }
 
 #[derive(Clone)]
 pub(in crate::kvm) struct VmFileState {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_ipa_bits: u8,
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_cache_ready: bool,
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub memory_gate: Arc<super::memory_gate::MemoryGate>,
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_gic: Arc<ax_kspin::SpinNoIrq<super::arm_gic::Gic>>,
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_devices: Vec<u64>,
     pub(in crate::kvm) vm: AxVMRef,
     /// Set once the VM file descriptor is closed.  The VM state must remain
     /// reachable while vCPU file descriptors are still open, matching Linux
@@ -87,6 +101,10 @@ pub(in crate::kvm) struct VmFileState {
 /// because the current control endpoint only needs to preserve KVM ABI payloads.
 #[derive(Clone)]
 pub(in crate::kvm) struct VcpuFileState {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_initialized: bool,
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_start: Option<(u64, u64)>,
     pub(in crate::kvm) vm_file: api_control::ControlFileId,
     pub(in crate::kvm) vcpu_id: u32,
     pub(in crate::kvm) mmap_area: api_control::MmapAreaId,
@@ -184,6 +202,8 @@ pub(in crate::kvm) enum PendingIoRead {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::kvm) struct MemorySlot {
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    pub arm_pages: Arc<[axaddrspace::HostPhysAddr]>,
     pub(in crate::kvm) flags: u32,
     pub(in crate::kvm) guest_phys_addr: u64,
     pub(in crate::kvm) memory_size: u64,
@@ -206,6 +226,7 @@ pub(in crate::kvm) struct PinnedPageGroup {
 }
 
 impl PinnedPageGroup {
+    #[cfg(target_arch = "x86_64")]
     pub(in crate::kvm) fn new(id: api_control::PinnedUserPagesId, pages: usize) -> Self {
         Self {
             id,
@@ -272,4 +293,14 @@ pub(in crate::kvm) enum GsiRoute {
         address_hi: u32,
         data: u32,
     },
+}
+
+impl VmFileState {
+    pub(super) fn has_live_children(&self) -> bool {
+        #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+        if !self.arm_devices.is_empty() {
+            return true;
+        }
+        !self.vcpu_files.is_empty()
+    }
 }

@@ -17,7 +17,9 @@ use alloc::{vec, vec::Vec};
 use ax_errno::{AxError, AxResult, ax_err};
 use axvisor_api::control as api_control;
 
-use super::{CONTROL_FILES, ControlFileState, OneReg, VcpuFileState};
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
+use super::OneReg;
+use super::{CONTROL_FILES, ControlFileState, VcpuFileState};
 #[cfg(target_arch = "x86_64")]
 use crate::kvm::run::apply_kvm_pv_msr_write;
 use crate::{
@@ -138,6 +140,7 @@ pub(in crate::kvm) fn set_mp_state(
     Ok(0)
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 pub(in crate::kvm) fn get_one_reg(
     control_file: api_control::ControlFileId,
     arg: usize,
@@ -148,6 +151,7 @@ pub(in crate::kvm) fn get_one_reg(
     Ok(0)
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 pub(in crate::kvm) fn set_one_reg(
     control_file: api_control::ControlFileId,
     arg: usize,
@@ -158,6 +162,7 @@ pub(in crate::kvm) fn set_one_reg(
     Ok(0)
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 pub(in crate::kvm) fn get_reg_list(
     control_file: api_control::ControlFileId,
     arg: usize,
@@ -497,6 +502,7 @@ fn get_emulated_msr(control_file: api_control::ControlFileId, index: u32) -> AxR
     Ok(vcpu.emulated_msrs.get(&index).copied().unwrap_or(0))
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 fn read_one_reg(arg: usize) -> AxResult<OneReg> {
     let mut bytes = [0u8; abi::KVM_ONE_REG_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
@@ -505,4 +511,19 @@ fn read_one_reg(arg: usize) -> AxResult<OneReg> {
         id: u64::from_ne_bytes(bytes[0..8].try_into().unwrap()),
         addr: u64::from_ne_bytes(bytes[8..16].try_into().unwrap()),
     })
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(in crate::kvm) fn get_one_reg(control_file: u64, arg: usize) -> AxResult<isize> {
+    super::arm::one_reg(control_file, arg, false)
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(in crate::kvm) fn set_one_reg(control_file: u64, arg: usize) -> AxResult<isize> {
+    super::arm::one_reg(control_file, arg, true)
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(in crate::kvm) fn get_reg_list(control_file: u64, arg: usize) -> AxResult<isize> {
+    super::arm::reg_list(control_file, arg)
 }

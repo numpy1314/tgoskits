@@ -28,6 +28,198 @@ use crate::kvm::{
 // UserspaceMemoryRegion is a plain KVM UAPI payload. MemorySlot below adds the
 // host backing state and therefore remains local to axvisor_core.
 
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(in crate::kvm) fn set_user_memory_region(
+    control_file: api_control::ControlFileId,
+    region: UserspaceMemoryRegion,
+) -> AxResult {
+    validate_memory_region(region)?;
+    if region.guest_phys_addr + region.memory_size > (1u64 << 48) {
+        return ax_err!(InvalidInput);
+    }
+    let (gate, vm_ref, ipa_bits) = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        (vm.memory_gate.clone(), vm.vm.clone(), vm.arm_ipa_bits)
+    };
+    if region.guest_phys_addr + region.memory_size > (1u64 << ipa_bits) {
+        return ax_err!(InvalidInput);
+    }
+    // No host spinlock is held while waiting for running vCPUs or pinning RAM.
+    let _writer = gate.write();
+    let cache_ready = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        if region.memory_size != 0 {
+            ensure_no_memory_overlap(vm, region.slot, &region.into())?;
+        }
+        vm.arm_cache_ready
+    };
+    let mut new_slot: MemorySlot = region.into();
+    if region.memory_size != 0 {
+        let mm = api_control::retain_current_user_address_space()?;
+        let result = api_control::pin_user_pages(
+            mm,
+            region.userspace_addr as usize,
+            region.memory_size as usize,
+            true,
+        );
+        let release = api_control::release_user_address_space(mm);
+        let pinned = result?;
+        if let Err(error) = release {
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return Err(error);
+        }
+        if pinned.pages.len() != region.memory_size as usize / abi::PAGE_SIZE_USIZE {
+            let _ = api_control::release_pinned_user_pages(pinned.id);
+            return ax_err!(InvalidInput);
+        }
+        new_slot.pinned_pages = pinned.id;
+        new_slot.arm_pages = pinned
+            .pages
+            .into_iter()
+            .map(|p| HostPhysAddr::from(p.as_usize()))
+            .collect();
+    }
+    if cache_ready {
+        clean_arm_pages(&new_slot.arm_pages);
+    }
+    let old_slot = {
+        let mut files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get_mut(&control_file) else {
+            if new_slot.pinned_pages != 0 {
+                let _ = api_control::release_pinned_user_pages(new_slot.pinned_pages);
+            }
+            return ax_err!(NotFound);
+        };
+        vm.memory_slots.remove(&region.slot)
+    };
+    if let Some(old) = &old_slot {
+        // Retain old pins until the new mapping is committed or rolled back.
+        for index in 0..old.arm_pages.len() {
+            if let Err(error) = vm_ref.unmap_region(
+                GuestPhysAddr::from(old.guest_phys_addr as usize + index * abi::PAGE_SIZE_USIZE),
+                abi::PAGE_SIZE_USIZE,
+            ) {
+                // An inconsistent table must not resume or release still-mapped pins.
+                let _ = vm_ref.shutdown();
+                if let Some(ControlFileState::Vm(vm)) = CONTROL_FILES.lock().get_mut(&control_file)
+                {
+                    vm.memory_slots.insert(region.slot, old_slot.unwrap());
+                }
+                if new_slot.pinned_pages != 0 {
+                    let _ = api_control::release_pinned_user_pages(new_slot.pinned_pages);
+                }
+                return Err(error);
+            }
+        }
+    }
+    let result = map_arm_slot(&vm_ref, &new_slot);
+    if result.is_err() {
+        if let Some(old) = old_slot {
+            if map_arm_slot(&vm_ref, &old).is_err() {
+                // Never resume a VM whose rollback could not allocate tables.
+                let _ = vm_ref.shutdown();
+            }
+            if let Some(ControlFileState::Vm(vm)) = CONTROL_FILES.lock().get_mut(&control_file) {
+                vm.memory_slots.insert(region.slot, old);
+            }
+        }
+        if new_slot.pinned_pages != 0 {
+            let _ = api_control::release_pinned_user_pages(new_slot.pinned_pages);
+        }
+        return result;
+    }
+    if let Some(old) = old_slot {
+        let _ = api_control::release_pinned_user_pages(old.pinned_pages);
+    }
+    if region.memory_size != 0 {
+        let mut files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get_mut(&control_file) else {
+            drop(files);
+            unmap_memory_slot(&vm_ref, new_slot);
+            return ax_err!(NotFound);
+        };
+        vm.memory_slots.insert(region.slot, new_slot);
+    }
+    Ok(())
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+fn map_arm_slot(vm: &AxVMRef, slot: &MemorySlot) -> AxResult {
+    let regions: alloc::vec::Vec<_> = slot
+        .arm_pages
+        .iter()
+        .enumerate()
+        .map(|(index, &hpa)| {
+            (
+                GuestPhysAddr::from(slot.guest_phys_addr as usize + index * abi::PAGE_SIZE_USIZE),
+                hpa,
+            )
+        })
+        .collect();
+    vm.map_regions_linear(
+        &regions,
+        abi::PAGE_SIZE_USIZE,
+        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER,
+    )
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+fn clean_arm_pages(pages: &[HostPhysAddr]) {
+    for page in pages {
+        let address =
+            axvisor_api::memory::phys_to_virt(axvisor_api::memory::PhysAddr::from(page.as_usize()));
+        crate::arch::clean_dcache_range(address, abi::PAGE_SIZE_USIZE);
+    }
+    // The VMM loads the image after registering RAM. Publish those writes
+    // before the first entry, including on CPUs without IDC/DIC coherence.
+    unsafe {
+        core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb");
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+pub(super) fn prepare_arm_execution(file: u64) -> AxResult {
+    let gate = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get(&file) else {
+            return ax_err!(NotFound);
+        };
+        if vm.arm_cache_ready {
+            return Ok(());
+        }
+        vm.memory_gate.clone()
+    };
+    let _writer = gate.write();
+    let pages: alloc::vec::Vec<_> = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vm(vm)) = files.get(&file) else {
+            return ax_err!(NotFound);
+        };
+        if vm.arm_cache_ready {
+            return Ok(());
+        }
+        vm.memory_slots
+            .values()
+            .map(|slot| slot.arm_pages.clone())
+            .collect()
+    };
+    for group in pages {
+        clean_arm_pages(&group);
+    }
+    let mut files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vm(vm)) = files.get_mut(&file) else {
+        return ax_err!(NotFound);
+    };
+    vm.arm_cache_ready = true;
+    Ok(())
+}
+
 pub(in crate::kvm) fn read_userspace_memory_region(arg: usize) -> AxResult<UserspaceMemoryRegion> {
     let mut bytes = [0u8; abi::KVM_USERSPACE_MEMORY_REGION_SIZE as usize];
     api_control::copy_from_user(arg, &mut bytes)?;
@@ -41,6 +233,7 @@ pub(in crate::kvm) fn read_userspace_memory_region(arg: usize) -> AxResult<Users
     })
 }
 
+#[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
 pub(in crate::kvm) fn set_user_memory_region(
     control_file: api_control::ControlFileId,
     region: UserspaceMemoryRegion,
@@ -386,6 +579,8 @@ fn validate_memory_region(region: UserspaceMemoryRegion) -> AxResult {
 impl From<UserspaceMemoryRegion> for MemorySlot {
     fn from(region: UserspaceMemoryRegion) -> Self {
         Self {
+            #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+            arm_pages: Default::default(),
             flags: region.flags,
             guest_phys_addr: region.guest_phys_addr,
             memory_size: region.memory_size,
@@ -397,7 +592,10 @@ impl From<UserspaceMemoryRegion> for MemorySlot {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "arm-vhe")
+)))]
 fn map_pinned_user_memory(
     vm: &AxVMRef,
     region: UserspaceMemoryRegion,
