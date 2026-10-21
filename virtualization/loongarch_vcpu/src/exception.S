@@ -353,7 +353,7 @@ _guest_exit:
 .global _exception_vectors
 _exception_vectors:
     .org 0x0
-    b       _irq_handler_vector
+    b       _sync_handler_vector
     .org 0x80
     b       _sync_handler_vector
     .org 0x100
@@ -363,6 +363,10 @@ _exception_vectors:
     .org 0x200
     b       _sync_handler_vector
     .org 0x280
+    b       _sync_handler_vector
+    .org 0x300
+    b       _sync_handler_vector
+    .org 0x380
     b       _sync_handler_vector
     .org 0x400
     b       _sync_handler_vector
