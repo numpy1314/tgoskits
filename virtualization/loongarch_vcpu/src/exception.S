@@ -6,7 +6,7 @@
     st.d    $r2,  $sp, 16
     // $t0 is $r12. Preserve the guest value before using it as scratch.
     st.d    $r12, $sp, 96
-    csrrd   $t0, 0x502
+    csrrd   $t0, {root_temp_ks}
     st.d    $t0, $sp, 24
     st.d    $r4,  $sp, 32
     st.d    $r5,  $sp, 40
@@ -175,7 +175,7 @@
 
 .macro RESTORE_GUEST_REGS
     ld.d    $t0, $sp, 24
-    csrwr   $t0, 0x502
+    csrwr   $t0, {root_temp_ks}
 
     ld.d    $t0, $sp, 256
     csrwr   $t0, 0x6
@@ -331,14 +331,18 @@
     ld.d    $r30, $sp, 240
     ld.d    $r31, $sp, 248
     ld.d    $r0,  $sp, 0
-    csrwr   $sp, 0x502
+    csrrd   $sp, {root_temp_ks}
 .endm
 
 .global _run_guest
 _run_guest:
     move    $t1, $ra
-    addi.d  $t0, $a0, 792
-    csrwr   $t0, 0x33
+    csrrd   $t0, {root_context_ks}
+    st.d    $t0, $a0, {host_context_ks_offset}
+    csrrd   $t0, {root_temp_ks}
+    st.d    $t0, $a0, {host_temp_ks_offset}
+    move    $t0, $a0
+    csrwr   $t0, {root_context_ks}
     move    $sp, $a0
     RESTORE_GUEST_REGS
     ertn
@@ -443,25 +447,22 @@ _exception_vectors:
     b       _irq_handler_vector
 
 _irq_handler_vector:
-    csrwr   $sp, 0x502
-    csrrd   $sp, 0x33
-    addi.d  $sp, $sp, -792
+    csrwr   $sp, {root_temp_ks}
+    csrrd   $sp, {root_context_ks}
     SAVE_GUEST_REGS
     li.d    $a0, 1
     b       _guest_exit
 
 _sync_handler_vector:
-    csrwr   $sp, 0x502
-    csrrd   $sp, 0x33
-    addi.d  $sp, $sp, -792
+    csrwr   $sp, {root_temp_ks}
+    csrrd   $sp, {root_context_ks}
     SAVE_GUEST_REGS
     li.d    $a0, 0
     b       _guest_exit
 
 _hvc_handler_vector:
-    csrwr   $sp, 0x502
-    csrrd   $sp, 0x33
-    addi.d  $sp, $sp, -792
+    csrwr   $sp, {root_temp_ks}
+    csrrd   $sp, {root_context_ks}
     SAVE_GUEST_REGS
     li.d    $a0, 0
     b       _guest_exit

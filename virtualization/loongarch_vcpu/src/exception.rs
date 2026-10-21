@@ -444,16 +444,37 @@ pub fn handle_exception_irq(ctx: &mut LoongArchContextFrame) -> AxResult<AxVCpuE
     Ok(AxVCpuExitReason::Nothing)
 }
 
+// Linux permanently owns KS3 as PERCPU_BASE_KS. When hosted, use the two
+// scratch CSRs reserved for KVM; the Linux adapter rejects CONFIG_KVM so the
+// ownership is exclusive. Standalone builds keep the original KS3/DESAVE ABI.
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const ROOT_CONTEXT_KS: usize = 0x34;
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const ROOT_TEMP_KS: usize = 0x35;
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+const ROOT_CONTEXT_KS: usize = 0x33;
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+const ROOT_TEMP_KS: usize = 0x502;
+
 #[cfg(target_arch = "loongarch64")]
-core::arch::global_asm!(include_str!("exception.S"));
+core::arch::global_asm!(
+    include_str!("exception.S"),
+    root_context_ks = const ROOT_CONTEXT_KS,
+    root_temp_ks = const ROOT_TEMP_KS,
+    host_context_ks_offset = const crate::vcpu::HOST_CONTEXT_KS_OFFSET,
+    host_temp_ks_offset = const crate::vcpu::HOST_TEMP_KS_OFFSET,
+);
 
 #[cfg(target_arch = "loongarch64")]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn vmexit_trampoline() -> ! {
     core::arch::naked_asm!(
-        "addi.d $t0, $sp, {ctx_size}",
-        "ld.d $t1, $t0, 0",
+        "ld.d $t1, $sp, {host_stack_top_offset}",
+        "ld.d $t0, $sp, {host_context_ks_offset}",
+        "csrwr $t0, {root_context_ks}",
+        "ld.d $t0, $sp, {host_temp_ks_offset}",
+        "csrwr $t0, {root_temp_ks}",
         "move $sp, $t1",
         "ld.d $ra, $sp, 0",
         "ld.d $s0, $sp, 8",
@@ -470,6 +491,10 @@ unsafe extern "C" fn vmexit_trampoline() -> ! {
         "ld.d $r21, $sp, 96",
         "addi.d $sp, $sp, 14 * 8",
         "jr $ra",
-        ctx_size = const core::mem::size_of::<LoongArchContextFrame>(),
+        host_stack_top_offset = const crate::vcpu::HOST_STACK_TOP_OFFSET,
+        host_context_ks_offset = const crate::vcpu::HOST_CONTEXT_KS_OFFSET,
+        host_temp_ks_offset = const crate::vcpu::HOST_TEMP_KS_OFFSET,
+        root_context_ks = const ROOT_CONTEXT_KS,
+        root_temp_ks = const ROOT_TEMP_KS,
     )
 }

@@ -48,6 +48,8 @@ pub struct LoongArchVCpu {
     ctx: LoongArchContextFrame,
     #[allow(dead_code)]
     host_stack_top: usize,
+    host_context_ks: usize,
+    host_temp_ks: usize,
     stage2_root: HostPhysAddr,
     vm_id: VMId,
     vcpu_id: VCpuId,
@@ -127,6 +129,8 @@ impl AxArchVCpu for LoongArchVCpu {
         Ok(Self {
             ctx,
             host_stack_top: 0,
+            host_context_ks: 0,
+            host_temp_ks: 0,
             stage2_root: HostPhysAddr::from_usize(0),
             vm_id: _vm_id,
             vcpu_id: _vcpu_id,
@@ -215,6 +219,15 @@ impl AxArchVCpu for LoongArchVCpu {
         self.ctx.set_a0(val);
     }
 }
+
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_STACK_TOP_OFFSET: usize =
+    core::mem::offset_of!(LoongArchVCpu, host_stack_top);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_CONTEXT_KS_OFFSET: usize =
+    core::mem::offset_of!(LoongArchVCpu, host_context_ks);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_TEMP_KS_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_temp_ks);
 
 impl LoongArchVCpu {
     fn init_hv(&mut self, config: LoongArchVCpuSetupConfig) {
