@@ -300,6 +300,43 @@
     ld.d    $t0, $sp, 736
     gcsrwr  $t0, 0x183
 
+    // In hosted mode, switch the root-owned virtualization and translation
+    // state only after guest CSR restoration has completed. No Rust or C code
+    // runs between this block and ERTN.
+    .if {enter_pvm_in_asm}
+    ld.d    $t0, $sp, {guest_gctl_offset}
+    csrwr   $t0, 0x51
+    ld.d    $t0, $sp, {guest_gintc_offset}
+    csrwr   $t0, 0x52
+    ld.d    $t0, $sp, {guest_gtlbc_offset}
+    csrwr   $t0, 0x15
+    ld.d    $t0, $sp, {guest_gstat_offset}
+    csrwr   $t0, 0x50
+    ld.d    $t0, $sp, {guest_prmd_offset}
+    csrwr   $t0, 0x1
+
+    li.d    $t0, {stage2_pwcl}
+    csrwr   $t0, 0x1c
+    li.d    $t0, {stage2_pwch}
+    csrwr   $t0, 0x1d
+    li.d    $t0, 12
+    csrwr   $t0, 0x1e
+    ld.d    $t0, $sp, {stage2_root_offset}
+    csrwr   $t0, 0x19
+    ld.d    $t0, $sp, {stage2_root_offset}
+    csrwr   $t0, 0x1a
+    ld.d    $t0, $sp, {guest_tlbrentry_offset}
+    csrwr   $t0, 0x88
+    ld.d    $t0, $sp, {guest_eentry_offset}
+    csrwr   $t0, 0xc
+    ld.d    $t0, $sp, {guest_ecfg_offset}
+    csrwr   $t0, 0x4
+    invtlb  0x0, $r0, $r0
+
+    ori     $t0, $zero, 0x2
+    csrxchg $t0, $t0, 0x50
+    .endif
+
     ld.d    $r1,  $sp, 8
     ld.d    $r2,  $sp, 16
     ld.d    $r4,  $sp, 32

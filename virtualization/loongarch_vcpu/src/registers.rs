@@ -1,6 +1,8 @@
 use ax_kspin::SpinNoIrq as Mutex;
 
 pub const CSR_GSTAT: u16 = 0x50;
+#[cfg(feature = "linux-host")]
+pub const CSR_PRMD: u16 = 0x1;
 pub const CSR_EENTRY: u16 = 0x0c;
 pub const CSR_GCTL: u16 = 0x51;
 pub const CSR_GTLBC: u16 = 0x15;
@@ -18,11 +20,14 @@ pub const GCSR_EENTRY: usize = 0x0c;
 
 pub const GINTC_HWIS_MASK: usize = 0xff;
 pub const GINTC_HWIS_SHIFT: usize = 0;
+#[cfg(not(feature = "linux-host"))]
 pub const GINTC_HWIP_MASK: usize = 0xff << 8;
+#[cfg(not(feature = "linux-host"))]
 pub const GINTC_HWIP_SHIFT: usize = 8;
 
 pub const INT_HWI0: usize = 2;
 pub const INT_HWI7: usize = 9;
+#[cfg(not(feature = "linux-host"))]
 pub const INT_TIMER: usize = 11;
 pub const INT_IPI: usize = 12;
 
@@ -92,6 +97,7 @@ pub(crate) unsafe fn gstat_write(value: usize) {
     csr_write::<CSR_GSTAT>(value);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn set_csr_bits<const CSR_NUM: u16>(
     range_lsb: usize,
@@ -104,6 +110,7 @@ pub(crate) unsafe fn set_csr_bits<const CSR_NUM: u16>(
     csr_write::<CSR_NUM>(new_value);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn set_csr_bit<const CSR_NUM: u16>(bit: usize, value: bool) {
     let current = csr_read::<CSR_NUM>();
@@ -116,66 +123,79 @@ pub(crate) unsafe fn set_csr_bit<const CSR_NUM: u16>(bit: usize, value: bool) {
     csr_write::<CSR_NUM>(new_value);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gstat_set_gid(gid: usize) {
     set_csr_bits::<CSR_GSTAT>(16, 8, gid);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gstat_set_pgm(pgm: bool) {
     set_csr_bit::<CSR_GSTAT>(1, pgm);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gtlbc_set_use_tgid(use_tgid: bool) {
     set_csr_bit::<CSR_GTLBC>(12, use_tgid);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gtlbc_set_tgid(tgid: usize) {
     set_csr_bits::<CSR_GTLBC>(16, 8, tgid);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_matc(matc: usize) {
     set_csr_bits::<CSR_GCTL>(4, 2, matc);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_topi(topi: bool) {
     set_csr_bit::<CSR_GCTL>(7, topi);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_toti(toti: bool) {
     set_csr_bit::<CSR_GCTL>(9, toti);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_toe(toe: bool) {
     set_csr_bit::<CSR_GCTL>(11, toe);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_top(top: bool) {
     set_csr_bit::<CSR_GCTL>(13, top);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_tohu(tohu: bool) {
     set_csr_bit::<CSR_GCTL>(15, tohu);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_toci(toci: usize) {
     set_csr_bits::<CSR_GCTL>(20, 2, toci);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcfg_set_gpm_num(gpm_num: usize) {
     set_csr_bits::<CSR_GCTL>(24, 3, gpm_num);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gintc_set_hwip(mask: usize) {
     let mut gintc = read_gintc();
@@ -184,6 +204,7 @@ pub(crate) unsafe fn gintc_set_hwip(mask: usize) {
     write_gintc(gintc);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn set_ecfg_line_enabled(line: usize, enabled: bool) {
     let bit = 1usize << line;
@@ -196,11 +217,13 @@ pub(crate) unsafe fn set_ecfg_line_enabled(line: usize, enabled: bool) {
     csr_write::<CSR_ECFG>(new_value);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn set_ecfg_vs(vs: usize) {
     set_csr_bits::<CSR_ECFG>(16, 3, vs);
 }
 
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn get_ecfg_vs() -> usize {
     (csr_read::<CSR_ECFG>() >> 16) & 0x7

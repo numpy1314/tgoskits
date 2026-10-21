@@ -3,26 +3,30 @@ use ax_errno::AxResult;
 use ax_errno::ax_err;
 #[cfg(target_arch = "loongarch64")]
 use ax_memory_addr::VirtAddr;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 use ax_page_table_multiarch::loongarch64::LA64MetaData;
 use axaddrspace::{GuestPhysAddr, HostPhysAddr};
 use axvcpu::{AxArchVCpu, AxVCpuExitReason};
 #[cfg(target_arch = "loongarch64")]
 use axvisor_api::memory;
 use axvisor_api::vmm::{VCpuId, VMId};
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 use loongArch64::register::prmd;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::exception::{TrapKind, handle_exception_irq, handle_exception_sync};
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+use crate::registers::{CSR_ECFG, CSR_GCTL, CSR_GINTC, CSR_GSTAT, CSR_GTLBC, CSR_PRMD};
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+use crate::registers::{
+    INT_TIMER, csr_write, gcfg_set_gpm_num, gcfg_set_matc, gcfg_set_toci, gcfg_set_toe,
+    gcfg_set_tohu, gcfg_set_top, gcfg_set_topi, gcfg_set_toti, get_ecfg_vs, gintc_set_hwip,
+    gstat_set_gid, gstat_set_pgm, gtlbc_set_tgid, gtlbc_set_use_tgid, set_ecfg_line_enabled,
+    set_ecfg_vs,
+};
 use crate::{
     context_frame::LoongArchContextFrame,
-    registers::{
-        CSR_PGDH, CSR_PGDL, CSR_PWCH, CSR_PWCL, CSR_STLBPS, CSR_TLBRENTRY, INT_TIMER, csr_read,
-        csr_write, gcfg_set_gpm_num, gcfg_set_matc, gcfg_set_toci, gcfg_set_toe, gcfg_set_tohu,
-        gcfg_set_top, gcfg_set_topi, gcfg_set_toti, get_ecfg_vs, gintc_set_hwip, gstat_set_gid,
-        gstat_set_pgm, gtlbc_set_tgid, gtlbc_set_use_tgid, set_ecfg_line_enabled, set_ecfg_vs,
-    },
+    registers::{CSR_PGDH, CSR_PGDL, CSR_PWCH, CSR_PWCL, CSR_STLBPS, CSR_TLBRENTRY, csr_read},
 };
 
 #[cfg(target_arch = "loongarch64")]
@@ -42,6 +46,12 @@ unsafe fn save_host_sp() {
     HOST_SP.write_current_raw(sp);
 }
 
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const fn replace_bits(value: usize, shift: usize, width: usize, field: usize) -> usize {
+    let mask = ((1usize << width) - 1) << shift;
+    (value & !mask) | ((field << shift) & mask)
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct LoongArchVCpu {
@@ -50,43 +60,64 @@ pub struct LoongArchVCpu {
     host_stack_top: usize,
     host_context_ks: usize,
     host_temp_ks: usize,
+    host_ecfg: usize,
+    host_eentry: usize,
+    host_pgdl: usize,
+    host_pgdh: usize,
+    host_pwcl: usize,
+    host_pwch: usize,
+    host_stlbps: usize,
+    host_tlbrentry: usize,
+    host_gstat: usize,
+    host_gtlbc: usize,
+    host_gctl: usize,
+    host_gintc: usize,
+    host_prmd: usize,
+    guest_eentry: usize,
+    guest_tlbrentry: usize,
+    guest_ecfg: usize,
+    guest_gstat: usize,
+    guest_gtlbc: usize,
+    guest_gctl: usize,
+    guest_gintc: usize,
+    guest_prmd: usize,
     stage2_root: HostPhysAddr,
     vm_id: VMId,
     vcpu_id: VCpuId,
     cpu_id: usize,
 }
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_PGDL: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_PGDH: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_PWCL: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_PWCH: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_STLBPS: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_STAGE2_TLBRENTRY: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_GUEST_EXIT_EENTRY: usize = 0;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 #[ax_percpu::def_percpu]
 static HOST_ECFG_VS: usize = 0;
 
 /// Host CSR number for TCFG (Timer Configuration).
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 const CSR_HOST_TCFG: u16 = 0x41;
 
 /// TCFG.EN bit: timer enable.
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 const TCFG_EN: usize = 0x1;
 
 #[cfg(target_arch = "loongarch64")]
@@ -131,6 +162,27 @@ impl AxArchVCpu for LoongArchVCpu {
             host_stack_top: 0,
             host_context_ks: 0,
             host_temp_ks: 0,
+            host_ecfg: 0,
+            host_eentry: 0,
+            host_pgdl: 0,
+            host_pgdh: 0,
+            host_pwcl: 0,
+            host_pwch: 0,
+            host_stlbps: 0,
+            host_tlbrentry: 0,
+            host_gstat: 0,
+            host_gtlbc: 0,
+            host_gctl: 0,
+            host_gintc: 0,
+            host_prmd: 0,
+            guest_eentry: 0,
+            guest_tlbrentry: 0,
+            guest_ecfg: 0,
+            guest_gstat: 0,
+            guest_gtlbc: 0,
+            guest_gctl: 0,
+            guest_gintc: 0,
+            guest_prmd: 0,
             stage2_root: HostPhysAddr::from_usize(0),
             vm_id: _vm_id,
             vcpu_id: _vcpu_id,
@@ -161,11 +213,14 @@ impl AxArchVCpu for LoongArchVCpu {
             // to GCSR TCFG transparently (no GSPR trap), so the only place we can
             // observe the guest's timer configuration is in ctx.gcsr_tcfg, which is
             // updated by SAVE_GUEST_REGS on each VM exit.
+            #[cfg(not(feature = "linux-host"))]
             self.sync_guest_timer_to_host();
 
             log::debug!("LoongArch guest entry context:\n{}", self.ctx);
             let exit_reason = unsafe {
                 save_host_sp();
+                #[cfg(feature = "linux-host")]
+                self.prepare_hosted_world_switch();
                 self.run_guest()
             };
 
@@ -184,7 +239,7 @@ impl AxArchVCpu for LoongArchVCpu {
 
     fn bind(&mut self) -> AxResult {
         let _ = self.cpu_id;
-        #[cfg(target_arch = "loongarch64")]
+        #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
         unsafe {
             self.save_host_translation_state();
             self.activate_stage2_walk_state();
@@ -198,7 +253,7 @@ impl AxArchVCpu for LoongArchVCpu {
     }
 
     fn unbind(&mut self) -> AxResult {
-        #[cfg(target_arch = "loongarch64")]
+        #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
         unsafe {
             set_ecfg_line_enabled(INT_TIMER, true);
             self.restore_host_translation_state();
@@ -228,8 +283,95 @@ pub(crate) const HOST_CONTEXT_KS_OFFSET: usize =
     core::mem::offset_of!(LoongArchVCpu, host_context_ks);
 #[cfg(target_arch = "loongarch64")]
 pub(crate) const HOST_TEMP_KS_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_temp_ks);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_ECFG_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_ecfg);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_EENTRY_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_eentry);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_PGDL_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_pgdl);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_PGDH_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_pgdh);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_PWCL_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_pwcl);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_PWCH_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_pwch);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_STLBPS_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_stlbps);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_TLBRENTRY_OFFSET: usize =
+    core::mem::offset_of!(LoongArchVCpu, host_tlbrentry);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_GSTAT_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_gstat);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_GTLBC_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_gtlbc);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_GCTL_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_gctl);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_GINTC_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_gintc);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const HOST_PRMD_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, host_prmd);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_EENTRY_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_eentry);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_TLBRENTRY_OFFSET: usize =
+    core::mem::offset_of!(LoongArchVCpu, guest_tlbrentry);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_ECFG_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_ecfg);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_GSTAT_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_gstat);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_GTLBC_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_gtlbc);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_GCTL_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_gctl);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_GINTC_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_gintc);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const GUEST_PRMD_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, guest_prmd);
+#[cfg(target_arch = "loongarch64")]
+pub(crate) const STAGE2_ROOT_OFFSET: usize = core::mem::offset_of!(LoongArchVCpu, stage2_root);
 
 impl LoongArchVCpu {
+    /// Capture every root CSR changed by the hosted world switch. The exit
+    /// trampoline restores these fields before returning to Rust or Linux.
+    #[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+    unsafe fn prepare_hosted_world_switch(&mut self) {
+        unsafe extern "C" {
+            fn handle_tlb_refill();
+        }
+
+        self.host_ecfg = csr_read::<CSR_ECFG>();
+        self.host_eentry = csr_read::<{ crate::registers::CSR_EENTRY }>();
+        self.host_pgdl = csr_read::<CSR_PGDL>();
+        self.host_pgdh = csr_read::<CSR_PGDH>();
+        self.host_pwcl = csr_read::<CSR_PWCL>();
+        self.host_pwch = csr_read::<CSR_PWCH>();
+        self.host_stlbps = csr_read::<CSR_STLBPS>();
+        self.host_tlbrentry = csr_read::<CSR_TLBRENTRY>();
+        self.host_gstat = csr_read::<CSR_GSTAT>();
+        self.host_gtlbc = csr_read::<CSR_GTLBC>();
+        self.host_gctl = csr_read::<CSR_GCTL>();
+        self.host_gintc = csr_read::<CSR_GINTC>();
+        self.host_prmd = csr_read::<CSR_PRMD>();
+
+        let guest_id = (self.vm_id + 1) & 0xff;
+        self.guest_eentry = core::ptr::addr_of!(_exception_vectors) as usize;
+        let tlbrentry_vaddr = VirtAddr::from_ptr_of(handle_tlb_refill as *const ());
+        self.guest_tlbrentry = memory::virt_to_phys(tlbrentry_vaddr).as_usize();
+        self.guest_ecfg = replace_bits(self.host_ecfg, 16, 3, 5);
+        self.guest_gstat = replace_bits(self.host_gstat & !(1 << 1), 16, 8, guest_id);
+        self.guest_gtlbc = replace_bits(self.host_gtlbc | (1 << 12), 16, 8, guest_id);
+
+        let mut gctl = self.host_gctl;
+        gctl = replace_bits(gctl, 4, 2, 1);
+        gctl &= !((1 << 7) | (1 << 9) | (1 << 11) | (1 << 13) | (1 << 15));
+        gctl = replace_bits(gctl, 20, 2, 2);
+        self.guest_gctl = replace_bits(gctl, 24, 3, 0);
+        // Linux retains all physical HWI ownership. HWIP=0 makes those
+        // interrupts exit to the root instead of being delivered to the guest.
+        self.guest_gintc = replace_bits(self.host_gintc, 8, 8, 0);
+        self.guest_prmd = self.host_prmd | (1 << 2);
+    }
+
     fn init_hv(&mut self, config: LoongArchVCpuSetupConfig) {
         self.init_vm_context(config);
     }
@@ -264,7 +406,7 @@ impl LoongArchVCpu {
     /// model where each vCPU exclusively owns a physical CPU. In SMP or
     /// shared-CPU scenarios, a software-emulated timer (maintaining per-guest
     /// virtual TCFG/TVAL) will be needed.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     fn sync_guest_timer_to_host(&self) {
         let guest_tcfg = self.ctx.gcsr_tcfg;
         // Only program the host timer when the guest has set a non-zero
@@ -314,7 +456,7 @@ impl LoongArchVCpu {
     }
 
     /// Save host translation CSRs to per-CPU storage before switching to stage2.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     unsafe fn save_host_translation_state(&self) {
         HOST_GUEST_EXIT_EENTRY.write_current_raw(csr_read::<{ crate::registers::CSR_EENTRY }>());
         HOST_ECFG_VS.write_current_raw(get_ecfg_vs());
@@ -327,7 +469,7 @@ impl LoongArchVCpu {
     }
 
     /// Program stage2 page-walk CSRs from the VM's stage2 root.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     unsafe fn activate_stage2_walk_state(&self) {
         let root = self.stage2_root.as_usize();
         csr_write::<CSR_PWCL>(LA64MetaData::PWCL_VALUE as usize);
@@ -339,7 +481,7 @@ impl LoongArchVCpu {
 
     /// Install host exit vector table (CSR.EENTRY) and TLB refill handler
     /// (CSR.TLBRENTRY), then flush stale TLB entries.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     unsafe fn install_host_exit_vectors(&self) {
         unsafe extern "C" {
             fn handle_tlb_refill();
@@ -354,7 +496,7 @@ impl LoongArchVCpu {
     }
 
     /// Enable LVZ guest-mode hardware: GID, TGID, PGM, GCFG, GINTC, PRMD.PIE.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     unsafe fn enable_guest_mode(&self) {
         let guest_id = self.vm_id + 1;
         gstat_set_gid(guest_id);
@@ -375,7 +517,7 @@ impl LoongArchVCpu {
     }
 
     /// Restore host translation CSRs from per-CPU storage.
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
     unsafe fn restore_host_translation_state(&self) {
         csr_write::<{ crate::registers::CSR_EENTRY }>(HOST_GUEST_EXIT_EENTRY.read_current_raw());
         set_ecfg_vs(HOST_ECFG_VS.read_current_raw());
@@ -412,7 +554,7 @@ impl LoongArchVCpu {
             "st.d $t0, $t1, 0",
             "bl {run_guest_asm}",
             "bl {run_guest_panic}",
-            host_stack_top_offset = const core::mem::size_of::<crate::context_frame::LoongArchContextFrame>(),
+            host_stack_top_offset = const HOST_STACK_TOP_OFFSET,
             run_guest_asm = sym _run_guest,
             run_guest_panic = sym Self::run_guest_panic,
         );

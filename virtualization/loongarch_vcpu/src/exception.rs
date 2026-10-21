@@ -1,4 +1,6 @@
 use ax_errno::AxResult;
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+use ax_page_table_multiarch::loongarch64::LA64MetaData;
 use axaddrspace::{GuestPhysAddr, MappingFlags};
 use axvcpu::AxVCpuExitReason;
 
@@ -455,6 +457,18 @@ const ROOT_TEMP_KS: usize = 0x35;
 const ROOT_CONTEXT_KS: usize = 0x33;
 #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 const ROOT_TEMP_KS: usize = 0x502;
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const ENTER_PVM_IN_ASM: usize = 1;
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+const ENTER_PVM_IN_ASM: usize = 0;
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const HOSTED_STAGE2_PWCL: usize = LA64MetaData::PWCL_VALUE as usize;
+#[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
+const HOSTED_STAGE2_PWCH: usize = LA64MetaData::PWCH_VALUE as usize;
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+const HOSTED_STAGE2_PWCL: usize = 0;
+#[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
+const HOSTED_STAGE2_PWCH: usize = 0;
 
 #[cfg(target_arch = "loongarch64")]
 core::arch::global_asm!(
@@ -463,6 +477,18 @@ core::arch::global_asm!(
     root_temp_ks = const ROOT_TEMP_KS,
     host_context_ks_offset = const crate::vcpu::HOST_CONTEXT_KS_OFFSET,
     host_temp_ks_offset = const crate::vcpu::HOST_TEMP_KS_OFFSET,
+    enter_pvm_in_asm = const ENTER_PVM_IN_ASM,
+    guest_eentry_offset = const crate::vcpu::GUEST_EENTRY_OFFSET,
+    guest_tlbrentry_offset = const crate::vcpu::GUEST_TLBRENTRY_OFFSET,
+    guest_ecfg_offset = const crate::vcpu::GUEST_ECFG_OFFSET,
+    guest_gstat_offset = const crate::vcpu::GUEST_GSTAT_OFFSET,
+    guest_gtlbc_offset = const crate::vcpu::GUEST_GTLBC_OFFSET,
+    guest_gctl_offset = const crate::vcpu::GUEST_GCTL_OFFSET,
+    guest_gintc_offset = const crate::vcpu::GUEST_GINTC_OFFSET,
+    guest_prmd_offset = const crate::vcpu::GUEST_PRMD_OFFSET,
+    stage2_root_offset = const crate::vcpu::STAGE2_ROOT_OFFSET,
+    stage2_pwcl = const HOSTED_STAGE2_PWCL,
+    stage2_pwch = const HOSTED_STAGE2_PWCH,
 );
 
 #[cfg(target_arch = "loongarch64")]
@@ -470,6 +496,35 @@ core::arch::global_asm!(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn vmexit_trampoline() -> ! {
     core::arch::naked_asm!(
+        ".if {restore_hosted_world_switch}",
+        "ld.d $t0, $sp, {host_ecfg_offset}",
+        "csrwr $t0, 0x4",
+        "ld.d $t0, $sp, {host_eentry_offset}",
+        "csrwr $t0, 0xc",
+        "ld.d $t0, $sp, {host_pgdl_offset}",
+        "csrwr $t0, 0x19",
+        "ld.d $t0, $sp, {host_pgdh_offset}",
+        "csrwr $t0, 0x1a",
+        "ld.d $t0, $sp, {host_pwcl_offset}",
+        "csrwr $t0, 0x1c",
+        "ld.d $t0, $sp, {host_pwch_offset}",
+        "csrwr $t0, 0x1d",
+        "ld.d $t0, $sp, {host_stlbps_offset}",
+        "csrwr $t0, 0x1e",
+        "ld.d $t0, $sp, {host_tlbrentry_offset}",
+        "csrwr $t0, 0x88",
+        "ld.d $t0, $sp, {host_gctl_offset}",
+        "csrwr $t0, 0x51",
+        "ld.d $t0, $sp, {host_gintc_offset}",
+        "csrwr $t0, 0x52",
+        "ld.d $t0, $sp, {host_gtlbc_offset}",
+        "csrwr $t0, 0x15",
+        "ld.d $t0, $sp, {host_gstat_offset}",
+        "csrwr $t0, 0x50",
+        "ld.d $t0, $sp, {host_prmd_offset}",
+        "csrwr $t0, 0x1",
+        "invtlb 0x0, $r0, $r0",
+        ".endif",
         "ld.d $t1, $sp, {host_stack_top_offset}",
         "ld.d $t0, $sp, {host_context_ks_offset}",
         "csrwr $t0, {root_context_ks}",
@@ -496,5 +551,19 @@ unsafe extern "C" fn vmexit_trampoline() -> ! {
         host_temp_ks_offset = const crate::vcpu::HOST_TEMP_KS_OFFSET,
         root_context_ks = const ROOT_CONTEXT_KS,
         root_temp_ks = const ROOT_TEMP_KS,
+        restore_hosted_world_switch = const ENTER_PVM_IN_ASM,
+        host_ecfg_offset = const crate::vcpu::HOST_ECFG_OFFSET,
+        host_eentry_offset = const crate::vcpu::HOST_EENTRY_OFFSET,
+        host_pgdl_offset = const crate::vcpu::HOST_PGDL_OFFSET,
+        host_pgdh_offset = const crate::vcpu::HOST_PGDH_OFFSET,
+        host_pwcl_offset = const crate::vcpu::HOST_PWCL_OFFSET,
+        host_pwch_offset = const crate::vcpu::HOST_PWCH_OFFSET,
+        host_stlbps_offset = const crate::vcpu::HOST_STLBPS_OFFSET,
+        host_tlbrentry_offset = const crate::vcpu::HOST_TLBRENTRY_OFFSET,
+        host_gstat_offset = const crate::vcpu::HOST_GSTAT_OFFSET,
+        host_gtlbc_offset = const crate::vcpu::HOST_GTLBC_OFFSET,
+        host_gctl_offset = const crate::vcpu::HOST_GCTL_OFFSET,
+        host_gintc_offset = const crate::vcpu::HOST_GINTC_OFFSET,
+        host_prmd_offset = const crate::vcpu::HOST_PRMD_OFFSET,
     )
 }
