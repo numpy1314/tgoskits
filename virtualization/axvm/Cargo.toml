@@ -14,6 +14,11 @@ default = ["vmx"]
 vmx = ["axaddrspace/vmx", "x86_vcpu/vmx"]
 svm = ["axaddrspace/svm", "x86_vcpu/svm"]
 arm-vhe = ["axaddrspace/arm-vhe", "arm_vcpu/vhe", "axvisor_api/arm-vhe"]
+linux-host = [
+    "ax-percpu/custom-base",
+    "ax-percpu/external-base",
+    "loongarch_vcpu/linux-host",
+]
 4-level-ept = ["vmx"]   # TODO: Realize 4-level-ept on x86_64 and riscv64.
 
 [dependencies]

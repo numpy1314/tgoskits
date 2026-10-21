@@ -12,6 +12,12 @@ license = "Apache-2.0"
 [package.metadata.docs.rs]
 targets = ["loongarch64-unknown-none-softfloat"]
 
+[features]
+default = []
+# The Linux host owns the architectural per-CPU register. Resolve the
+# ax-percpu base through the host callback instead of overwriting $r21.
+linux-host = ["ax-percpu/custom-base", "ax-percpu/external-base"]
+
 [dependencies]
 ax-kspin.workspace = true
 log = "0.4"
