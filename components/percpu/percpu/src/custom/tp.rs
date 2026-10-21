@@ -1,6 +1,10 @@
 #[cfg(all(
     feature = "external-base",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "loongarch64"
+    )
 ))]
 unsafe extern "C" {
     /// Resolve the per-CPU area for the currently running host CPU.
@@ -37,7 +41,10 @@ pub fn read_percpu_reg() -> usize {
                         unimplemented!()
                     }
                 }
-            } else if #[cfg(all(target_arch = "aarch64", feature = "external-base"))] {
+            } else if #[cfg(all(
+                feature = "external-base",
+                any(target_arch = "aarch64", target_arch = "loongarch64")
+            ))] {
                 tp = ax_percpu_current_base();
             } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
                 core::arch::asm!("mv {}, gp", out(reg) tp)
@@ -64,7 +71,11 @@ pub fn read_percpu_reg() -> usize {
 /// This function is unsafe because it writes the low-level register directly.
 #[cfg(all(
     feature = "external-base",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "loongarch64"
+    )
 ))]
 pub unsafe fn write_percpu_reg(_tp: usize) {}
 
@@ -74,7 +85,11 @@ pub unsafe fn write_percpu_reg(_tp: usize) {}
 /// The caller must own the per-CPU register and provide valid backing memory.
 #[cfg(not(all(
     feature = "external-base",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "loongarch64"
+    )
 )))]
 pub unsafe fn write_percpu_reg(tp: usize) {
     unsafe {
