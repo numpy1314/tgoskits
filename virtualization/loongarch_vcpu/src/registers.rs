@@ -51,7 +51,7 @@ pub(crate) unsafe fn csr_read<const CSR_NUM: u16>() -> usize {
 #[cfg(target_arch = "loongarch64")]
 #[inline(always)]
 pub(crate) unsafe fn csr_write<const CSR_NUM: u16>(value: usize) {
-    core::arch::asm!("csrwr {}, {}", in(reg) value, const CSR_NUM);
+    core::arch::asm!("csrwr {}, {}", inout(reg) value => _, const CSR_NUM);
 }
 
 #[cfg(not(target_arch = "loongarch64"))]
@@ -78,7 +78,7 @@ pub(crate) unsafe fn gcsr_read<const GCSR_NUM: usize>() -> usize {
 #[cfg(target_arch = "loongarch64")]
 #[inline(always)]
 pub(crate) unsafe fn gcsr_write<const GCSR_NUM: usize>(value: usize) {
-    core::arch::asm!("gcsrwr {}, {}", in(reg) value, const GCSR_NUM);
+    core::arch::asm!("gcsrwr {}, {}", inout(reg) value => _, const GCSR_NUM);
 }
 
 #[cfg(not(target_arch = "loongarch64"))]
