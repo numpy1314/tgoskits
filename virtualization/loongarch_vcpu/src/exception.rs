@@ -146,40 +146,70 @@ const CSR_TCFG: usize = 0x41;
 const CSR_TVAL: usize = 0x42;
 const CSR_TICLR: usize = 0x44;
 
-/// Emulate guest timer CSR accesses by passing through to the host hardware
-/// timer. In the 1:1 vCPU model the host hardware timer is shared: when the
-/// guest writes TCFG/TVAL we program the actual timer so that it fires, and
-/// when it fires the IRQ handler injects the interrupt into the guest ESTAT.
+/// Emulate a trapped guest timer CSR access.
+///
+/// `rj` selects the CSR operation: zero is `csrrd`, one is `csrwr`, and any
+/// other register selects `csrxchg`. The write candidate always comes from the
+/// original value of `rd`; for `csrxchg`, the original `rj` value is the mask.
 fn emulate_timer_csr(ctx: &mut LoongArchContextFrame, rd: usize, rj: usize, csr: usize) {
-    if rj == 0 {
-        // csrrd – read the current host hardware timer value.
-        let value = read_host_timer_csr(csr);
-        ctx.set_gpr(rd, value);
-        log::debug!("Timer CSR read: csr={:#x} -> {:#x}", csr, value);
-    } else {
-        // csrwr / csrxchg – write guest value to host hardware timer.
-        let old_value = read_host_timer_csr(csr);
-        let new_value = ctx.x[rj];
-        write_host_timer_csr(csr, new_value);
-        ctx.set_gpr(rd, old_value);
+    let candidate = ctx.x[rd];
+    let old_value = read_timer_csr(ctx, csr);
+    let (return_value, written_value) = match rj {
+        0 => (old_value, None),
+        1 => (old_value, Some(candidate)),
+        _ => {
+            let mask = ctx.x[rj];
+            (
+                old_value & mask,
+                Some((old_value & !mask) | (candidate & mask)),
+            )
+        }
+    };
+
+    if let Some(new_value) = written_value {
+        write_timer_csr(ctx, csr, new_value);
+        // TICLR belongs to the guest timer state. In hosted mode in
+        // particular, never acknowledge the Linux root timer here.
+        if csr == CSR_TICLR && (new_value & 0x1) != 0 {
+            ctx.gcsr_estat &= !TIMER_BIT;
+        }
         log::debug!(
             "Timer CSR write: csr={:#x} <- {:#x} (old={:#x})",
             csr,
             new_value,
             old_value
         );
+    } else {
+        log::debug!("Timer CSR read: csr={:#x} -> {:#x}", csr, old_value);
+    }
 
-        // When the guest clears the timer interrupt via TICLR, also clear the
-        // injected timer bit in the guest ESTAT so the guest doesn't re-take
-        // the interrupt on the next VM entry.
-        if csr == CSR_TICLR && (new_value & 0x1) != 0 {
-            ctx.gcsr_estat &= !TIMER_BIT;
-        }
+    ctx.set_gpr(rd, return_value);
+}
+
+#[cfg(feature = "linux-host")]
+fn read_timer_csr(ctx: &LoongArchContextFrame, csr: usize) -> usize {
+    match csr {
+        CSR_TCFG => ctx.gcsr_tcfg,
+        CSR_TVAL => ctx.gcsr_tval,
+        CSR_TICLR => ctx.gcsr_ticlr,
+        _ => 0,
     }
 }
 
-/// Read a host hardware timer CSR via inline assembly.
-fn read_host_timer_csr(csr: usize) -> usize {
+#[cfg(feature = "linux-host")]
+fn write_timer_csr(ctx: &mut LoongArchContextFrame, csr: usize, value: usize) {
+    match csr {
+        CSR_TCFG => ctx.gcsr_tcfg = value,
+        CSR_TVAL => ctx.gcsr_tval = value,
+        CSR_TICLR => ctx.gcsr_ticlr = value,
+        _ => {}
+    }
+}
+
+/// In standalone mode the physical CPU is dedicated to the vCPU, so the
+/// existing 1:1 timer passthrough remains available.
+#[cfg(not(feature = "linux-host"))]
+fn read_timer_csr(_ctx: &LoongArchContextFrame, csr: usize) -> usize {
     let value: usize;
     unsafe {
         match csr {
@@ -192,13 +222,13 @@ fn read_host_timer_csr(csr: usize) -> usize {
     value
 }
 
-/// Write a host hardware timer CSR via inline assembly.
-fn write_host_timer_csr(csr: usize, value: usize) {
+#[cfg(not(feature = "linux-host"))]
+fn write_timer_csr(_ctx: &mut LoongArchContextFrame, csr: usize, value: usize) {
     unsafe {
         match csr {
-            CSR_TCFG => core::arch::asm!("csrwr {}, 0x41", in(reg) value),
-            CSR_TVAL => core::arch::asm!("csrwr {}, 0x42", in(reg) value),
-            CSR_TICLR => core::arch::asm!("csrwr {}, 0x44", in(reg) value),
+            CSR_TCFG => core::arch::asm!("csrwr {}, 0x41", inout(reg) value => _),
+            CSR_TVAL => core::arch::asm!("csrwr {}, 0x42", inout(reg) value => _),
+            CSR_TICLR => core::arch::asm!("csrwr {}, 0x44", inout(reg) value => _),
             _ => {}
         }
     }
@@ -396,15 +426,15 @@ pub fn handle_exception_sync(ctx: &mut LoongArchContextFrame) -> AxResult<AxVCpu
             get_badi(ctx)
         ),
     };
-    // When a timer interrupt is pending alongside a synchronous exception, the
-    // sync exception wins in the hardware priority arbitration and the IRQ exit
-    // is never taken. Forward the timer interrupt into the guest by setting the
-    // timer bit in the guest ESTAT so that it is observed on the next VM entry.
+    // Standalone dedicates the root timer to the vCPU. Linux-host must leave a
+    // pending root timer untouched so Linux handles it after the ownership
+    // token restores local interrupts.
+    #[cfg(not(feature = "linux-host"))]
     if get_guest_interrupt_status(ctx) & TIMER_BIT != 0 {
         ctx.gcsr_estat |= TIMER_BIT;
         // Acknowledge the host timer interrupt so it stops firing.
         unsafe {
-            core::arch::asm!("csrwr {}, 0x44", in(reg) 1usize);
+            core::arch::asm!("csrwr {}, 0x44", inout(reg) 1usize => _);
         }
     }
     result
@@ -412,38 +442,54 @@ pub fn handle_exception_sync(ctx: &mut LoongArchContextFrame) -> AxResult<AxVCpu
 
 pub fn handle_exception_irq(ctx: &mut LoongArchContextFrame) -> AxResult<AxVCpuExitReason> {
     let guest_is = get_guest_interrupt_status(ctx);
-    let is = guest_is;
 
-    if let Some(vector) = decode_interrupt_vector(is) {
-        log::info!(
-            "LoongArch guest irq exit: vector={}, guest_is={:#x}, sepc={:#x}, gera={:#x}",
-            vector,
+    #[cfg(feature = "linux-host")]
+    {
+        // Every root IRQ remains owned by Linux. Return immediately even when
+        // ESTAT.IS cannot be decoded; re-entering the guest would starve the
+        // pending Linux interrupt behind the disabled-IRQ ownership window.
+        log::trace!(
+            "LoongArch Linux-host irq exit: vector={:?}, root_is={:#x}, sepc={:#x}, gera={:#x}",
+            decode_interrupt_vector(guest_is),
             guest_is,
             get_guest_pc(ctx),
             ctx.gcsr_era
         );
-
-        // Inject the timer interrupt into the guest by setting the timer bit
-        // in the guest ESTAT. On the next VM entry RESTORE_GUEST_REGS will
-        // write this to GCSR ESTAT, so the guest sees the interrupt.
-        if vector == INT_TIMER {
-            ctx.gcsr_estat |= TIMER_BIT;
-        }
-
-        return Ok(AxVCpuExitReason::ExternalInterrupt {
-            vector: vector as u64,
-        });
+        Ok(AxVCpuExitReason::PreemptionTimer)
     }
 
-    log::warn!(
-        "LoongArch guest irq exit with unknown status: guest_is={:#x}, saved_estat={:#x}, \
-         sepc={:#x}, gera={:#x}",
-        guest_is,
-        ctx.host_estat,
-        get_guest_pc(ctx),
-        ctx.gcsr_era
-    );
-    Ok(AxVCpuExitReason::Nothing)
+    #[cfg(not(feature = "linux-host"))]
+    {
+        if let Some(vector) = decode_interrupt_vector(guest_is) {
+            log::info!(
+                "LoongArch guest irq exit: vector={}, guest_is={:#x}, sepc={:#x}, gera={:#x}",
+                vector,
+                guest_is,
+                get_guest_pc(ctx),
+                ctx.gcsr_era
+            );
+
+            // Inject the timer interrupt into the guest by setting the timer
+            // bit in guest ESTAT for the next VM entry.
+            if vector == INT_TIMER {
+                ctx.gcsr_estat |= TIMER_BIT;
+            }
+
+            return Ok(AxVCpuExitReason::ExternalInterrupt {
+                vector: vector as u64,
+            });
+        }
+
+        log::warn!(
+            "LoongArch guest irq exit with unknown status: guest_is={:#x}, saved_estat={:#x}, \
+             sepc={:#x}, gera={:#x}",
+            guest_is,
+            ctx.host_estat,
+            get_guest_pc(ctx),
+            ctx.gcsr_era
+        );
+        Ok(AxVCpuExitReason::Nothing)
+    }
 }
 
 // Linux permanently owns KS3 as PERCPU_BASE_KS. When hosted, use the two
