@@ -4,6 +4,8 @@
     st.d    $r0,  $sp, 0
     st.d    $r1,  $sp, 8
     st.d    $r2,  $sp, 16
+    // $t0 is $r12. Preserve the guest value before using it as scratch.
+    st.d    $r12, $sp, 96
     csrrd   $t0, 0x502
     st.d    $t0, $sp, 24
     st.d    $r4,  $sp, 32
@@ -14,7 +16,6 @@
     st.d    $r9,  $sp, 72
     st.d    $r10, $sp, 80
     st.d    $r11, $sp, 88
-    st.d    $r12, $sp, 96
     st.d    $r13, $sp, 104
     st.d    $r14, $sp, 112
     st.d    $r15, $sp, 120
@@ -392,9 +393,9 @@ _exception_vectors:
     .org 0xa80
     b       _sync_handler_vector
     .org 0xb00
-    b       _hvc_handler_vector
-    .org 0xb80
     b       _sync_handler_vector
+    .org 0xb80
+    b       _hvc_handler_vector
     .org 0xc00
     b       _sync_handler_vector
     .org 0xc80
@@ -403,6 +404,39 @@ _exception_vectors:
     b       _sync_handler_vector
     .org 0xd80
     b       _sync_handler_vector
+
+    // Interrupt exception codes occupy vector slots 64 through 78 when
+    // ECFG.VS=5 (0x80 bytes per slot).
+    .org 0x2000
+    b       _irq_handler_vector
+    .org 0x2080
+    b       _irq_handler_vector
+    .org 0x2100
+    b       _irq_handler_vector
+    .org 0x2180
+    b       _irq_handler_vector
+    .org 0x2200
+    b       _irq_handler_vector
+    .org 0x2280
+    b       _irq_handler_vector
+    .org 0x2300
+    b       _irq_handler_vector
+    .org 0x2380
+    b       _irq_handler_vector
+    .org 0x2400
+    b       _irq_handler_vector
+    .org 0x2480
+    b       _irq_handler_vector
+    .org 0x2500
+    b       _irq_handler_vector
+    .org 0x2580
+    b       _irq_handler_vector
+    .org 0x2600
+    b       _irq_handler_vector
+    .org 0x2680
+    b       _irq_handler_vector
+    .org 0x2700
+    b       _irq_handler_vector
 
 _irq_handler_vector:
     csrwr   $sp, 0x502
