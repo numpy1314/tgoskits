@@ -58,6 +58,41 @@ pub type AxVCpuRef = Arc<VCpu>;
 /// A reference to a VM.
 pub type AxVMRef = Arc<AxVM>;
 
+#[cfg(all(target_arch = "loongarch64", feature = "loongarch-linux-host"))]
+unsafe extern "C" {
+    fn axvisor_linux_loongarch_vcpu_enter(token: *mut usize) -> i32;
+    fn axvisor_linux_loongarch_vcpu_exit(token: usize);
+}
+
+#[cfg(all(target_arch = "loongarch64", feature = "loongarch-linux-host"))]
+struct LoongArchLinuxHostToken(usize);
+
+#[cfg(all(target_arch = "loongarch64", feature = "loongarch-linux-host"))]
+impl LoongArchLinuxHostToken {
+    fn enter() -> AxResult<Self> {
+        let mut token = 0;
+        let status = unsafe { axvisor_linux_loongarch_vcpu_enter(&mut token) };
+        if status == 0 {
+            Ok(Self(token))
+        } else {
+            let error = if status < 0 {
+                AxError::try_from(status).unwrap_or(AxError::BadState)
+            } else {
+                AxError::BadState
+            };
+            warn!("LoongArch Linux vCPU ownership entry failed: {status}");
+            Err(error)
+        }
+    }
+}
+
+#[cfg(all(target_arch = "loongarch64", feature = "loongarch-linux-host"))]
+impl Drop for LoongArchLinuxHostToken {
+    fn drop(&mut self) {
+        unsafe { axvisor_linux_loongarch_vcpu_exit(self.0) };
+    }
+}
+
 struct AxVmInterruptRouter {
     vm_id: usize,
 }
@@ -639,7 +674,12 @@ impl AxVM {
         }
         #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
         let _guard = HostToken(axvisor_api::arch::vhe_host_enter()?);
-        #[cfg(not(all(target_arch = "aarch64", feature = "arm-vhe")))]
+        #[cfg(all(target_arch = "loongarch64", feature = "loongarch-linux-host"))]
+        let _guard = LoongArchLinuxHostToken::enter()?;
+        #[cfg(not(any(
+            all(target_arch = "aarch64", feature = "arm-vhe"),
+            all(target_arch = "loongarch64", feature = "loongarch-linux-host")
+        )))]
         let _guard = ax_kernel_guard::IrqSave::new();
         vcpu.bind()?;
         let result = f();
