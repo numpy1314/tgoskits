@@ -7,11 +7,12 @@ mod pcpu;
 mod registers;
 mod vcpu;
 
+#[cfg(not(feature = "linux-host"))]
+pub use self::registers::inject_interrupt;
 pub use self::{
     context_frame::LoongArchContextFrame,
     exception::{TrapKind, handle_exception_irq, handle_exception_sync},
     pcpu::LoongArchPerCpu,
-    registers::inject_interrupt,
     vcpu::{LoongArchVCpu, LoongArchVCpuCreateConfig, LoongArchVCpuSetupConfig},
 };
 

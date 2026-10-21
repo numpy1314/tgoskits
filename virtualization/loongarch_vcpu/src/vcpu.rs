@@ -16,7 +16,10 @@ use loongArch64::register::prmd;
 #[cfg(target_arch = "loongarch64")]
 use crate::exception::{TrapKind, handle_exception_irq, handle_exception_sync};
 #[cfg(all(target_arch = "loongarch64", feature = "linux-host"))]
-use crate::registers::{CSR_ECFG, CSR_GCTL, CSR_GINTC, CSR_GSTAT, CSR_GTLBC, CSR_PRMD};
+use crate::registers::{
+    CSR_ECFG, CSR_GCTL, CSR_GINTC, CSR_GSTAT, CSR_GTLBC, CSR_PRMD, GINTC_HWIS_MASK,
+    GINTC_HWIS_SHIFT, INT_HWI0, INT_HWI7, INT_IPI,
+};
 #[cfg(all(target_arch = "loongarch64", not(feature = "linux-host")))]
 use crate::registers::{
     INT_TIMER, csr_write, gcfg_set_gpm_num, gcfg_set_matc, gcfg_set_toci, gcfg_set_toe,
@@ -81,6 +84,7 @@ pub struct LoongArchVCpu {
     guest_gctl: usize,
     guest_gintc: usize,
     guest_prmd: usize,
+    pending_hwis: usize,
     stage2_root: HostPhysAddr,
     vm_id: VMId,
     vcpu_id: VCpuId,
@@ -183,6 +187,7 @@ impl AxArchVCpu for LoongArchVCpu {
             guest_gctl: 0,
             guest_gintc: 0,
             guest_prmd: 0,
+            pending_hwis: 0,
             stage2_root: HostPhysAddr::from_usize(0),
             vm_id: _vm_id,
             vcpu_id: _vcpu_id,
@@ -266,6 +271,20 @@ impl AxArchVCpu for LoongArchVCpu {
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {
+        #[cfg(feature = "linux-host")]
+        {
+            if vector > INT_IPI {
+                log::warn!("LoongArch64: invalid interrupt vector {vector}");
+                return Ok(());
+            }
+
+            if (INT_HWI0..=INT_HWI7).contains(&vector) {
+                self.pending_hwis |= 1 << (vector - INT_HWI0);
+            } else {
+                self.ctx.gcsr_estat |= 1usize << vector;
+            }
+        }
+        #[cfg(not(feature = "linux-host"))]
         crate::registers::inject_interrupt(vector);
         Ok(())
     }
@@ -366,9 +385,12 @@ impl LoongArchVCpu {
         gctl &= !((1 << 7) | (1 << 9) | (1 << 11) | (1 << 13) | (1 << 15));
         gctl = replace_bits(gctl, 20, 2, 2);
         self.guest_gctl = replace_bits(gctl, 24, 3, 0);
-        // Linux retains all physical HWI ownership. HWIP=0 makes those
-        // interrupts exit to the root instead of being delivered to the guest.
-        self.guest_gintc = replace_bits(self.host_gintc, 8, 8, 0);
+        // Linux retains all physical HWI ownership. Only the per-vCPU software
+        // injection shadow is exposed through HWIS; HWIP=0 routes every
+        // physical interrupt back to the Linux root.
+        self.guest_gintc = self.host_gintc & !GINTC_HWIS_MASK;
+        self.guest_gintc |= (self.pending_hwis << GINTC_HWIS_SHIFT) & GINTC_HWIS_MASK;
+        self.guest_gintc = replace_bits(self.guest_gintc, 8, 8, 0);
         self.guest_prmd = self.host_prmd | (1 << 2);
     }
 

@@ -1,3 +1,4 @@
+#[cfg(not(feature = "linux-host"))]
 use ax_kspin::SpinNoIrq as Mutex;
 
 pub const CSR_GSTAT: u16 = 0x50;
@@ -15,6 +16,7 @@ pub const CSR_STLBPS: u16 = 0x1e;
 pub const CSR_TLBRENTRY: u16 = 0x88;
 pub const CSR_ECFG: u16 = 0x4;
 
+#[cfg(not(feature = "linux-host"))]
 pub const GCSR_ESTAT: usize = 0x5;
 pub const GCSR_EENTRY: usize = 0x0c;
 
@@ -31,6 +33,7 @@ pub const INT_HWI7: usize = 9;
 pub const INT_TIMER: usize = 11;
 pub const INT_IPI: usize = 12;
 
+#[cfg(not(feature = "linux-host"))]
 static INJECT_INT_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(target_arch = "loongarch64")]
@@ -76,12 +79,14 @@ pub(crate) unsafe fn gcsr_read<const GCSR_NUM: usize>() -> usize {
 }
 
 #[cfg(target_arch = "loongarch64")]
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcsr_write<const GCSR_NUM: usize>(value: usize) {
     core::arch::asm!("gcsrwr {}, {}", inout(reg) value => _, const GCSR_NUM);
 }
 
 #[cfg(not(target_arch = "loongarch64"))]
+#[cfg(not(feature = "linux-host"))]
 #[inline(always)]
 pub(crate) unsafe fn gcsr_write<const GCSR_NUM: usize>(value: usize) {
     let _ = (GCSR_NUM, value);
@@ -234,14 +239,17 @@ pub(crate) fn gcsr_eentry_read() -> usize {
     unsafe { gcsr_read::<GCSR_EENTRY>() }
 }
 
+#[cfg(not(feature = "linux-host"))]
 fn read_gintc() -> usize {
     unsafe { csr_read::<CSR_GINTC>() }
 }
 
+#[cfg(not(feature = "linux-host"))]
 unsafe fn write_gintc(value: usize) {
     csr_write::<CSR_GINTC>(value);
 }
 
+#[cfg(not(feature = "linux-host"))]
 pub fn inject_interrupt(vector: usize) {
     if vector > INT_IPI {
         log::warn!("LoongArch64: invalid interrupt vector {vector}");
