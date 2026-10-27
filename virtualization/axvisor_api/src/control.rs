@@ -119,6 +119,26 @@ pub trait ControlIf {
     /// readable, it should return [`ax_errno::AxErrorKind::WouldBlock`].
     fn read_user_fd_ref(user_fd_ref: UserFdRefId, buf: &mut [u8]) -> AxResult<usize>;
 
+    /// Waits until a retained fd may be read, without consuming its data.
+    ///
+    /// Called by one sleepable listener per reference after `WouldBlock`.
+    /// Readiness must be checked when subscribing so an earlier event cannot
+    /// be lost. The next read may still return `WouldBlock` if another reader
+    /// consumes the data. Unsupported objects return `Unsupported`.
+    /// Cancellation is persistent for this reference: both an active wait and
+    /// any later wait must return `Interrupted` after `cancel_user_fd_wait`.
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn wait_user_fd_readable(user_fd_ref: UserFdRefId) -> AxResult;
+
+    /// Cancels this reference's readiness wait without changing the fd data.
+    ///
+    /// May race with the listener entering its first or subsequent wait.
+    /// Must not wait for the listener. The caller joins the listener before
+    /// releasing the reference; release must detach any host callbacks.
+    /// Hosts without readiness waits return `Unsupported`.
+    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
+    fn cancel_user_fd_wait(user_fd_ref: UserFdRefId) -> AxResult;
+
     /// Releases a previously retained userspace fd.
     fn release_user_fd_ref(user_fd_ref: UserFdRefId) -> AxResult;
 
