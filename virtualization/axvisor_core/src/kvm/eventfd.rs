@@ -347,7 +347,7 @@ fn start_irqfd_listener(
 
 pub(in crate::kvm) fn stop_irqfd(irqfd: IrqFd) {
     irqfd.cancel.store(true, Ordering::Release);
-    wake_cancelled_irqfd(irqfd.user_fd_ref);
+    let _ = api_control::write_user_fd_ref(irqfd.user_fd_ref, &1u64.to_ne_bytes());
     // The listener owns a host task (and its kernel stack).  Wait for it to
     // observe the cancellation and exit before dropping the VM state, so
     // repeated VM create/destroy cycles do not leak tasks until spawn fails.
@@ -356,29 +356,6 @@ pub(in crate::kvm) fn stop_irqfd(irqfd: IrqFd) {
     // may still be reading the reference while cancellation is being
     // observed, so releasing it before join races with the listener.
     let _ = api_control::release_user_fd_ref(irqfd.user_fd_ref);
-}
-
-fn wake_cancelled_irqfd(user_fd_ref: api_control::UserFdRefId) {
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    match api_control::cancel_user_fd_wait(user_fd_ref) {
-        Ok(()) => return,
-        Err(err) if AxErrorKind::try_from(err) == Ok(AxErrorKind::Unsupported) => {}
-        Err(err) => {
-            warn!("KVM irqfd wait cancellation failed: {err:?}");
-        }
-    }
-    // Keep the existing wakeup for hosts without a cancellable readiness wait.
-    let _ = api_control::write_user_fd_ref(user_fd_ref, &1u64.to_ne_bytes());
-}
-
-fn wait_irqfd_readable(_user_fd_ref: api_control::UserFdRefId) -> AxResult {
-    #[cfg(all(target_arch = "aarch64", feature = "arm-vhe"))]
-    match api_control::wait_user_fd_readable(_user_fd_ref) {
-        Err(err) if AxErrorKind::try_from(err) == Ok(AxErrorKind::Unsupported) => {}
-        result => return result,
-    }
-    api_task::yield_now();
-    Ok(())
 }
 
 fn irqfd_listener_loop(
@@ -401,15 +378,12 @@ fn irqfd_listener_loop(
                 }
             }
             Ok(_) => api_task::yield_now(),
-            Err(err) if AxErrorKind::try_from(err) == Ok(AxErrorKind::WouldBlock) => {
-                if let Err(err) = wait_irqfd_readable(user_fd_ref)
-                    && AxErrorKind::try_from(err) != Ok(AxErrorKind::Interrupted)
-                {
-                    debug!("KVM irqfd readiness wait failed for GSI {gsi}: {err:?}");
-                    break;
-                }
-            }
-            Err(err) if AxErrorKind::try_from(err) == Ok(AxErrorKind::Interrupted) => {
+            Err(err)
+                if matches!(
+                    AxErrorKind::try_from(err),
+                    Ok(AxErrorKind::WouldBlock | AxErrorKind::Interrupted)
+                ) =>
+            {
                 api_task::yield_now();
             }
             Err(err) => {
