@@ -167,17 +167,15 @@ pub trait ControlIf {
     fn kick_cpu_wait(cpu: usize) -> AxResult;
 
     /// Interruptibly waits for a control predicate using the KVM signal mask.
-    /// `deadline` is an optional absolute host monotonic time in nanoseconds.
-    /// Returns true for the predicate, false for timeout, or Interrupted for
-    /// a deliverable signal. Predicate checking and queue notification must
+    /// Returns when the predicate is true, or Interrupted for a deliverable
+    /// signal. Predicate checking and queue notification must
     /// not lose a wakeup. Generic synchronization waits retain their semantics.
     #[cfg(target_arch = "aarch64")]
     fn wait_control_until(
         queue: usize,
         condition: Box<dyn Fn() -> bool + Send + 'static>,
         blocked_signals: &[u8],
-        deadline: Option<u64>,
-    ) -> AxResult<bool>;
+    ) -> AxResult;
 
     // Retained userspace address spaces and pinned pages.
 

@@ -409,7 +409,6 @@ fn wait_until_vcpu_runnable(
                     Err(_) => true,
                 }),
                 signal_mask,
-                None,
             )?;
         }
         #[cfg(not(target_arch = "aarch64"))]
