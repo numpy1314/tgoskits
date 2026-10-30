@@ -123,19 +123,33 @@ pub(in crate::kvm) fn set_mp_state(
     arg: usize,
 ) -> AxResult<isize> {
     let mp_state = read_u32_user(arg)?;
-    if mp_state > abi::KVM_MP_STATE_SUSPENDED {
-        return ax_err!(Unsupported);
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !matches!(
+            mp_state,
+            abi::KVM_MP_STATE_RUNNABLE | abi::KVM_MP_STATE_STOPPED
+        ) {
+            return ax_err!(Unsupported);
+        }
+        super::set_arm_vcpu_mp_state(control_file, mp_state)?;
+        Ok(0)
     }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        if mp_state > abi::KVM_MP_STATE_SUSPENDED {
+            return ax_err!(Unsupported);
+        }
 
-    let mut control_files = CONTROL_FILES.lock();
-    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
-        return ax_err!(NotFound);
-    };
-    vcpu.mp_state = mp_state;
-    if mp_state == abi::KVM_MP_STATE_RUNNABLE {
-        vcpu.halted = false;
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        vcpu.mp_state = mp_state;
+        if mp_state == abi::KVM_MP_STATE_RUNNABLE {
+            vcpu.halted = false;
+        }
+        Ok(0)
     }
-    Ok(0)
 }
 
 pub(in crate::kvm) fn get_one_reg(
@@ -143,7 +157,18 @@ pub(in crate::kvm) fn get_one_reg(
     arg: usize,
 ) -> AxResult<isize> {
     let one_reg = read_one_reg(arg)?;
-    let value = get_vcpu(control_file)?.get_arch_reg(one_reg.id)?;
+    let vcpu = get_vcpu(control_file)?;
+    #[cfg(target_arch = "aarch64")]
+    super::run::apply_pending_arm_reset(control_file, &vcpu)?;
+    #[cfg(target_arch = "aarch64")]
+    if one_reg.id == kvm_uapi::arm64::KVM_REG_ARM_PSCI_VERSION {
+        write_u64_user(
+            one_reg.addr as usize,
+            crate::arch::aarch64::PSCI_VERSION_0_2,
+        )?;
+        return Ok(0);
+    }
+    let value = vcpu.get_arch_reg(one_reg.id)?;
     write_u64_user(one_reg.addr as usize, value)?;
     Ok(0)
 }
@@ -153,8 +178,19 @@ pub(in crate::kvm) fn set_one_reg(
     arg: usize,
 ) -> AxResult<isize> {
     let one_reg = read_one_reg(arg)?;
+    let vcpu = get_vcpu(control_file)?;
+    #[cfg(target_arch = "aarch64")]
+    super::run::apply_pending_arm_reset(control_file, &vcpu)?;
     let value = read_u64_user(one_reg.addr as usize)?;
-    get_vcpu(control_file)?.set_arch_reg(one_reg.id, value)?;
+    #[cfg(target_arch = "aarch64")]
+    if one_reg.id == kvm_uapi::arm64::KVM_REG_ARM_PSCI_VERSION {
+        return if value == crate::arch::aarch64::PSCI_VERSION_0_2 {
+            Ok(0)
+        } else {
+            ax_err!(InvalidInput)
+        };
+    }
+    vcpu.set_arch_reg(one_reg.id, value)?;
     Ok(0)
 }
 
@@ -179,6 +215,7 @@ pub(in crate::kvm) fn arm_vcpu_init(
     let supported_features = (1u32 << KVM_ARM_VCPU_POWER_OFF) | (1u32 << KVM_ARM_VCPU_PSCI_0_2);
     if target != KVM_ARM_TARGET_GENERIC_V8
         || features[0] & !supported_features != 0
+        || features[0] & (1u32 << KVM_ARM_VCPU_PSCI_0_2) == 0
         || features[1..].iter().any(|feature| *feature != 0)
     {
         return ax_err!(Unsupported);
@@ -189,8 +226,24 @@ pub(in crate::kvm) fn arm_vcpu_init(
         return ax_err!(NotFound);
     };
     if vcpu.initialized {
+        // Repeated INIT requires architectural/cache reset support. Do not
+        // claim that clearing this boolean implements the native operation.
         return ax_err!(BadState);
     }
+    drop(control_files);
+    let mp_state = if features[0] & (1u32 << KVM_ARM_VCPU_POWER_OFF) != 0 {
+        abi::KVM_MP_STATE_STOPPED
+    } else {
+        abi::KVM_MP_STATE_RUNNABLE
+    };
+    super::set_arm_vcpu_mp_state(control_file, mp_state)?;
+    // INIT owns this vCPU's operation lock, so KVM_RUN cannot observe this
+    // intermediate state. Publish initialized after the power-state change;
+    // a concurrent system stop after that change must remain STOPPED.
+    let mut control_files = CONTROL_FILES.lock();
+    let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
+        return ax_err!(NotFound);
+    };
     vcpu.initialized = true;
     Ok(0)
 }
@@ -201,6 +254,14 @@ pub(in crate::kvm) fn get_reg_list(
 ) -> AxResult<isize> {
     let vcpu = get_vcpu(control_file)?;
     let reg_ids = vcpu.arch_reg_ids();
+    #[cfg(target_arch = "aarch64")]
+    let arm_reg_ids = {
+        let mut ids = reg_ids.to_vec();
+        ids.push(kvm_uapi::arm64::KVM_REG_ARM_PSCI_VERSION);
+        ids
+    };
+    #[cfg(target_arch = "aarch64")]
+    let reg_ids = arm_reg_ids.as_slice();
     let requested = read_u64_user(arg)? as usize;
     write_u64_user(arg, reg_ids.len() as u64)?;
     if requested < reg_ids.len() {

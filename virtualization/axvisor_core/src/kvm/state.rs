@@ -135,6 +135,67 @@ pub(in crate::kvm) struct VcpuFileState {
     pub(in crate::kvm) operation_lock: Arc<VcpuOperationLock>,
     #[cfg(target_arch = "aarch64")]
     pub(in crate::kvm) initialized: bool,
+    #[cfg(target_arch = "aarch64")]
+    pub(in crate::kvm) arm_run_state: Arc<ArmRunState>,
+    #[cfg(target_arch = "aarch64")]
+    pub(in crate::kvm) pending_arm_reset: Option<ArmPendingReset>,
+}
+
+/// Startup state is consumed only by the target's operation-lock owner.
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+pub(in crate::kvm) struct ArmPendingReset {
+    pub(in crate::kvm) pc: u64,
+    pub(in crate::kvm) arg: u64,
+    pub(in crate::kvm) be: bool,
+}
+
+/// Pairs the stop request with a CPU published in the IRQ-off entry window.
+/// Sequential consistency closes the store-buffering race: either the entry
+/// observes the request, or the requester observes and synchronously kicks
+/// the CPU. The ordinary MP state remains protected by CONTROL_FILES.
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) struct ArmRunState {
+    pub(in crate::kvm) entry_blocked: AtomicBool,
+    active_cpu: AtomicUsize,
+    pub(in crate::kvm) wait_queue: WaitQueue,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl ArmRunState {
+    const OUTSIDE: usize = usize::MAX;
+
+    pub(in crate::kvm) fn new(stopped: bool) -> Arc<Self> {
+        Arc::new(Self {
+            entry_blocked: AtomicBool::new(stopped),
+            active_cpu: AtomicUsize::new(Self::OUTSIDE),
+            wait_queue: WaitQueue::new(),
+        })
+    }
+
+    pub(in crate::kvm) fn enter(&self) -> bool {
+        self.active_cpu
+            .store(api_control::current_cpu_id(), Ordering::SeqCst);
+        if self.entry_blocked.load(Ordering::SeqCst) {
+            self.leave();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Called after architectural host state has been restored.
+    pub(in crate::kvm) fn leave(&self) {
+        self.active_cpu.store(Self::OUTSIDE, Ordering::SeqCst);
+    }
+
+    pub(in crate::kvm) fn kick(&self) -> ax_errno::AxResult {
+        let cpu = self.active_cpu.load(Ordering::SeqCst);
+        if cpu != Self::OUTSIDE {
+            api_control::kick_cpu_wait(cpu)?;
+        }
+        Ok(())
+    }
 }
 
 /// Serializes stateful ioctls issued through one KVM vCPU file.

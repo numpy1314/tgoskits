@@ -23,7 +23,10 @@ mod riscv;
 mod x86;
 
 #[cfg(target_arch = "aarch64")]
-use arm64::{handle_cpu_up, handle_in_kernel_device_exit, handle_psci_hypercall, handle_send_ipi};
+use arm64::{
+    ArmPsciOutcome, handle_cpu_up, handle_in_kernel_device_exit, handle_psci_hypercall,
+    handle_send_ipi,
+};
 use exit::{complete_io_read, complete_mmio_read, kvm_exit_reason, prepare_userspace_exit};
 #[cfg(target_arch = "riscv64")]
 use riscv::{handle_cpu_up, handle_send_ipi};
@@ -105,6 +108,14 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
     let _ = (vm_file, irqchip_created, pit2_created);
 
     let _context_guard = crate::context::bind_current_vcpu_context(vm.id(), vcpu_id);
+    #[cfg(target_arch = "aarch64")]
+    let arm_run_state = {
+        let files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(state)) = files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        state.arm_run_state.clone()
+    };
 
     // `exit_reason` is only meaningful when KVM_RUN returns successfully. Do
     // not leave a previous userspace exit visible when this invocation is
@@ -152,6 +163,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
         if current_vcpu_mp_state(control_file)? != abi::KVM_MP_STATE_RUNNABLE {
             wait_until_vcpu_runnable(control_file, &vcpu, &signal_mask)?;
         }
+        #[cfg(target_arch = "aarch64")]
+        apply_pending_arm_reset(control_file, &vcpu)?;
         for interrupt in take_control_vcpu_interrupts(control_file) {
             inject_virtual_interrupt(interrupt, &vcpu)?;
         }
@@ -163,7 +176,15 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
             break abi::KVM_EXIT_IRQ_WINDOW_OPEN;
         }
 
-        let exit_reason = match vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
+        #[cfg(target_arch = "aarch64")]
+        let run_result = vm.run_vcpu_raw_control(
+            vcpu_id,
+            |_, _| Ok(false),
+            || arm_run_state.enter(),
+            || arm_run_state.leave(),
+        );
+        #[cfg(not(target_arch = "aarch64"))]
+        let run_result = vm.run_vcpu_raw(vcpu_id, |addr, access_flags| {
             #[cfg(target_arch = "x86_64")]
             {
                 handle_memory_slot_page_fault(vm_file, addr, access_flags)
@@ -173,7 +194,8 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 let _ = (addr, access_flags);
                 Ok(false)
             }
-        }) {
+        });
+        let exit_reason = match run_result {
             Ok(exit_reason) => exit_reason,
             Err(_) => {
                 write_vcpu_run_u32(
@@ -254,8 +276,22 @@ pub(in crate::kvm) fn run_vcpu_file(control_file: api_control::ControlFileId) ->
                 axvisor_api::task::yield_now();
             }
             #[cfg(target_arch = "aarch64")]
-            AxVCpuExitReason::Hypercall { nr, .. } if handle_psci_hypercall(&vcpu, nr) => {
-                axvisor_api::task::yield_now();
+            AxVCpuExitReason::Hypercall { nr, args } => {
+                match handle_psci_hypercall(control_file, &vm, &vcpu, nr, args)? {
+                    Some(ArmPsciOutcome::Continue) => {}
+                    Some(ArmPsciOutcome::SystemEvent { kind }) => {
+                        debug_assert!(
+                            kind == abi::KVM_SYSTEM_EVENT_SHUTDOWN
+                                || kind == abi::KVM_SYSTEM_EVENT_RESET
+                        );
+                        break abi::KVM_EXIT_SYSTEM_EVENT;
+                    }
+                    None => {
+                        let reason = AxVCpuExitReason::Hypercall { nr, args };
+                        prepare_userspace_exit(control_file, &reason)?;
+                        break kvm_exit_reason(&reason);
+                    }
+                }
             }
             #[cfg(target_arch = "aarch64")]
             AxVCpuExitReason::CpuUp {
@@ -357,8 +393,71 @@ fn wait_until_vcpu_runnable(
         if current_vcpu_mp_state(control_file)? == abi::KVM_MP_STATE_RUNNABLE {
             return Ok(());
         }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let run_state = {
+                let files = CONTROL_FILES.lock();
+                let Some(ControlFileState::Vcpu(state)) = files.get(&control_file) else {
+                    return ax_err!(NotFound);
+                };
+                state.arm_run_state.clone()
+            };
+            api_control::wait_control_until(
+                run_state.wait_queue.as_raw(),
+                alloc::boxed::Box::new(move || match current_vcpu_mp_state(control_file) {
+                    Ok(state) => state == abi::KVM_MP_STATE_RUNNABLE,
+                    Err(_) => true,
+                }),
+                signal_mask,
+                None,
+            )?;
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         axvisor_api::task::yield_now();
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn apply_pending_arm_reset(
+    control_file: api_control::ControlFileId,
+    vcpu: &axvm::AxVCpuRef,
+) -> AxResult {
+    let reset = {
+        let mut files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(state)) = files.get_mut(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        state.pending_arm_reset.take()
+    };
+    if let Some(reset) = reset {
+        // Entry stays blocked while the target's operation-lock owner restores
+        // the architectural reset state, without holding CONTROL_FILES.
+        let result = arm64::apply_pending_arm_reset(vcpu, reset);
+        let mut files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(state)) = files.get_mut(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        if result.is_ok() {
+            // Reset disables both guest timers. Remove stale timer assertions
+            // while retaining unrelated device and interprocessor interrupts.
+            state
+                .pending_interrupts
+                .retain(|irq| !matches!(irq.vector, 27 | 30));
+            state.pending_mmio_read = None;
+            state.pending_io_read = None;
+        } else if state.pending_arm_reset.is_none() {
+            // Invalid startup state must not leave RUNNABLE permanently
+            // spinning at a closed entry gate. A failed architectural reset
+            // invalidates this vCPU, so userspace must recreate it.
+            state.mp_state = abi::KVM_MP_STATE_STOPPED;
+        }
+        state.arm_run_state.entry_blocked.store(
+            state.mp_state != abi::KVM_MP_STATE_RUNNABLE || state.pending_arm_reset.is_some(),
+            core::sync::atomic::Ordering::SeqCst,
+        );
+        result?;
+    }
+    Ok(())
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "vmx"))]

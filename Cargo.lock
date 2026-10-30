@@ -1929,6 +1929,7 @@ dependencies = [
  "ax-kspin",
  "ax-memory-addr",
  "ax-page-table-multiarch",
+ "ax-percpu",
  "ax-std",
  "axaddrspace",
  "axbuild",

@@ -22,6 +22,8 @@ use ax_errno::{AxError, AxResult, ax_err};
 use axvisor_api::control as api_control;
 use axvm::{AxVM, VMStatus, config::AxVMConfig};
 
+#[cfg(target_arch = "aarch64")]
+use super::state::ArmRunState;
 use super::{
     CONTROL_FILES, ControlFileState, KVM_CONTROL_OPS, VcpuFileState, VcpuOperationLock,
     VmFileState, next_control_file_id,
@@ -103,7 +105,9 @@ pub(in crate::kvm) fn create_vcpu_file(
         } else {
             abi::KVM_MP_STATE_STOPPED
         };
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        let mp_state = abi::KVM_MP_STATE_STOPPED;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let mp_state = if vcpu_id == 0 {
             abi::KVM_MP_STATE_RUNNABLE
         } else {
@@ -134,6 +138,10 @@ pub(in crate::kvm) fn create_vcpu_file(
                 operation_lock: VcpuOperationLock::new(),
                 #[cfg(target_arch = "aarch64")]
                 initialized: false,
+                #[cfg(target_arch = "aarch64")]
+                arm_run_state: ArmRunState::new(true),
+                #[cfg(target_arch = "aarch64")]
+                pending_arm_reset: None,
             }),
         );
         vcpu_file

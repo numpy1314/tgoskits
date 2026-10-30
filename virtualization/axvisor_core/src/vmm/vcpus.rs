@@ -581,6 +581,57 @@ fn vcpu_run(vm_id: usize, vcpu_id: usize) {
         rearm_vcpu_timeslice();
         match vm.run_vcpu(vcpu_id) {
             Ok(exit_reason) => {
+                // The architecture backend reports PSCI through Hypercall
+                // for both HVC and SMC. Preserve the static VMM's existing
+                // power-management actions independently of the KVM frontend.
+                #[cfg(target_arch = "aarch64")]
+                let exit_reason = match exit_reason {
+                    AxVCpuExitReason::Hypercall { nr, args } => {
+                        use crate::arch::aarch64::{
+                            PSCI_INVALID_PARAMS, PSCI_MPIDR_HWID_MASK, PSCI_NOT_SUPPORTED,
+                            PSCI_VERSION_0_2, PsciCall, decode_psci,
+                        };
+                        match decode_psci(nr, args) {
+                            Some(PsciCall::Version) => {
+                                vcpu.set_return_value(PSCI_VERSION_0_2 as usize);
+                                continue;
+                            }
+                            Some(PsciCall::MigrateInfoType) => {
+                                vcpu.set_return_value(2);
+                                continue;
+                            }
+                            Some(PsciCall::CpuOff) => AxVCpuExitReason::CpuDown { _state: 0 },
+                            Some(PsciCall::CpuOn {
+                                target,
+                                entry,
+                                context,
+                            }) => {
+                                if target & !PSCI_MPIDR_HWID_MASK != 0 || entry & 3 != 0 {
+                                    vcpu.set_return_value(PSCI_INVALID_PARAMS as usize);
+                                    continue;
+                                }
+                                AxVCpuExitReason::CpuUp {
+                                    target_cpu: target,
+                                    entry_point: GuestPhysAddr::from(entry as usize),
+                                    arg: context,
+                                }
+                            }
+                            Some(PsciCall::SystemOff) => AxVCpuExitReason::SystemDown,
+                            // Static restart requires a separate VM rebuilding
+                            // policy. Do not turn it into a physical reboot.
+                            Some(
+                                PsciCall::SystemReset
+                                | PsciCall::AffinityInfo { .. }
+                                | PsciCall::Unsupported,
+                            ) => {
+                                vcpu.set_return_value(PSCI_NOT_SUPPORTED as usize);
+                                continue;
+                            }
+                            None => AxVCpuExitReason::Hypercall { nr, args },
+                        }
+                    }
+                    reason => reason,
+                };
                 match exit_reason {
                     exit_reason if handle_internal_exit(&vm, &vcpu, &exit_reason) => {
                         #[cfg(not(target_arch = "x86_64"))]

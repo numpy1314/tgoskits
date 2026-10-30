@@ -183,6 +183,7 @@ pub mod public {
     pub const KVM_CAP_IOEVENTFD_ANY_LENGTH: usize = 122;
     pub const KVM_CAP_IMMEDIATE_EXIT: usize = 136;
     pub const KVM_CAP_XSAVE2: usize = 208;
+    pub const KVM_CAP_SYSTEM_EVENT_DATA: usize = 215;
 }
 
 // Linux reserves ioctl type 0xae for KVM.
@@ -337,6 +338,14 @@ pub const KVM_EXIT_SHUTDOWN: u32 = 8;
 pub const KVM_EXIT_FAIL_ENTRY: u32 = 9;
 pub const KVM_EXIT_INTR: u32 = 10;
 pub const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
+pub const KVM_EXIT_SYSTEM_EVENT: u32 = 24;
+pub const KVM_SYSTEM_EVENT_SHUTDOWN: u32 = 1;
+pub const KVM_SYSTEM_EVENT_RESET: u32 = 2;
+pub const KVM_RUN_SYSTEM_EVENT_OFFSET: usize = 32;
+pub const KVM_RUN_SYSTEM_EVENT_TYPE_OFFSET: usize = 32;
+pub const KVM_RUN_SYSTEM_EVENT_NDATA_OFFSET: usize = 36;
+pub const KVM_RUN_SYSTEM_EVENT_DATA_OFFSET: usize = 40;
+pub const KVM_RUN_SYSTEM_EVENT_SIZE: usize = 8 + 16 * 8;
 #[cfg(target_arch = "x86_64")]
 pub const KVM_EXIT_IOAPIC_EOI: u32 = 26;
 pub const KVM_INTERNAL_ERROR_EMULATION: u32 = 1;

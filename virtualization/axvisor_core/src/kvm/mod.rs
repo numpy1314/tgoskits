@@ -242,7 +242,139 @@ pub(crate) fn queue_control_vcpu_interrupt(route: InterruptRoute) -> AxResult {
     };
     vcpu.halted = false;
     vcpu.pending_interrupts.push_back(route.interrupt);
+    #[cfg(target_arch = "aarch64")]
+    let run_state = vcpu.arm_run_state.clone();
+    drop(control_files);
+    #[cfg(target_arch = "aarch64")]
+    run_state.wait_queue.wake_all();
     Ok(())
+}
+
+/// Changes the recoverable ARM power state without changing AxVM lifecycle.
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn set_arm_vcpu_mp_state(
+    control_file: api_control::ControlFileId,
+    mp_state: u32,
+) -> AxResult {
+    let run_state = {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(vcpu)) = control_files.get_mut(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        vcpu.mp_state = mp_state;
+        vcpu.halted = false;
+        if mp_state == KVM_MP_STATE_STOPPED {
+            vcpu.pending_arm_reset = None;
+        }
+        vcpu.arm_run_state.entry_blocked.store(
+            mp_state != KVM_MP_STATE_RUNNABLE || vcpu.pending_arm_reset.is_some(),
+            Ordering::SeqCst,
+        );
+        vcpu.arm_run_state.clone()
+    };
+    // Never wait for a physical IPI while holding CONTROL_FILES, an operation
+    // lock belonging to another vCPU, or an IRQ-off guard.
+    run_state.wait_queue.wake_all();
+    if mp_state != KVM_MP_STATE_RUNNABLE {
+        run_state.kick()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn stop_arm_vcpu(control_file: api_control::ControlFileId) -> AxResult {
+    set_arm_vcpu_mp_state(control_file, KVM_MP_STATE_STOPPED)
+}
+
+/// Publishes STOPPED to all vCPUs before synchronously forcing active guests
+/// back into the host. Sleeping KVM_RUN operations remain signal interruptible
+/// and explicit MP_STATE/CPU_ON can resume them after the system event.
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn prepare_system_event(
+    control_file: api_control::ControlFileId,
+    event_type: u32,
+) -> AxResult {
+    if event_type != KVM_SYSTEM_EVENT_SHUTDOWN && event_type != KVM_SYSTEM_EVENT_RESET {
+        return ax_err!(InvalidInput);
+    }
+    let run_states = {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(source)) = control_files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        let vm_file = source.vm_file;
+        let mut run_states = Vec::new();
+        for state in control_files.values_mut() {
+            if let ControlFileState::Vcpu(vcpu) = state
+                && vcpu.vm_file == vm_file
+            {
+                vcpu.mp_state = KVM_MP_STATE_STOPPED;
+                vcpu.halted = false;
+                vcpu.pending_arm_reset = None;
+                vcpu.arm_run_state
+                    .entry_blocked
+                    .store(true, Ordering::SeqCst);
+                run_states.push(vcpu.arm_run_state.clone());
+            }
+        }
+        run_states
+    };
+    let mut result = Ok(());
+    for run_state in run_states {
+        run_state.wait_queue.wake_all();
+        let kick_result = run_state.kick();
+        if result.is_ok() {
+            result = kick_result;
+        }
+    }
+    result
+}
+
+/// Queues startup under the same lock as system-stop publication. Only the
+/// target runner applies registers, with its per-vCPU operation lock held.
+#[cfg(target_arch = "aarch64")]
+pub(in crate::kvm) fn queue_arm_cpu_on(
+    control_file: api_control::ControlFileId,
+    target_id: usize,
+    pc: u64,
+    arg: u64,
+    be: bool,
+) -> AxResult<i64> {
+    let run_state = {
+        let mut control_files = CONTROL_FILES.lock();
+        let Some(ControlFileState::Vcpu(source)) = control_files.get(&control_file) else {
+            return ax_err!(NotFound);
+        };
+        if source.mp_state != KVM_MP_STATE_RUNNABLE {
+            return Ok(-3); // PSCI_DENIED: a system stop won the publication race.
+        }
+        let Some(ControlFileState::Vm(vm)) = control_files.get(&source.vm_file) else {
+            return ax_err!(NotFound);
+        };
+        let Some(target_file) = vm.vcpu_files.get(&(target_id as u32)).copied() else {
+            return Ok(-2); // PSCI_INVALID_PARAMS
+        };
+        let Some(ControlFileState::Vcpu(target)) = control_files.get_mut(&target_file) else {
+            return Ok(-2);
+        };
+        if !target.initialized {
+            return Ok(-2);
+        }
+        if target.mp_state != KVM_MP_STATE_STOPPED || target.pending_arm_reset.is_some() {
+            return Ok(-4); // PSCI_ALREADY_ON
+        }
+        target.pending_arm_reset = Some(ArmPendingReset { pc, arg, be });
+        target.mp_state = KVM_MP_STATE_RUNNABLE;
+        target.halted = false;
+        // Keep entry blocked until the target has consumed the reset.
+        target
+            .arm_run_state
+            .entry_blocked
+            .store(true, Ordering::SeqCst);
+        target.arm_run_state.clone()
+    };
+    run_state.wait_queue.wake_all();
+    Ok(0)
 }
 
 pub(crate) fn control_vcpu_mask(vm_id: usize) -> Option<usize> {
@@ -276,11 +408,7 @@ fn control_vcpu_file_by_vm_id(
     .ok_or(AxError::NotFound)
 }
 
-#[cfg(any(
-    target_arch = "aarch64",
-    target_arch = "x86_64",
-    target_arch = "riscv64"
-))]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 pub(in crate::kvm) fn vcpu_file_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -303,11 +431,7 @@ pub(in crate::kvm) fn vcpu_file_by_id(
         .ok_or(AxError::InvalidInput)
 }
 
-#[cfg(any(
-    target_arch = "aarch64",
-    target_arch = "riscv64",
-    all(target_arch = "x86_64", feature = "svm")
-))]
+#[cfg(any(target_arch = "riscv64", all(target_arch = "x86_64", feature = "svm")))]
 pub(in crate::kvm) fn set_vcpu_file_mp_state_by_id(
     control_file: api_control::ControlFileId,
     vcpu_id: usize,
@@ -486,7 +610,7 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
     // vCPU fd can safely be handed between userspace threads. Control-only
     // operations, especially interrupt injection and MP-state changes, must
     // remain available while KVM_RUN is blocked in the guest.
-    let _operation_guard = if matches!(
+    let needs_operation_lock = matches!(
         cmd,
         KVM_RUN
             | KVM_GET_REGS
@@ -500,7 +624,10 @@ fn vcpu_ioctl(control_file: api_control::ControlFileId, cmd: u32, arg: usize) ->
             | KVM_SET_ONE_REG
             | KVM_GET_DEBUGREGS
             | KVM_SET_DEBUGREGS
-    ) {
+    );
+    #[cfg(target_arch = "aarch64")]
+    let needs_operation_lock = needs_operation_lock || cmd == KVM_ARM_VCPU_INIT;
+    let _operation_guard = if needs_operation_lock {
         let operation_lock = {
             let control_files = CONTROL_FILES.lock();
             let Some(ControlFileState::Vcpu(vcpu)) = control_files.get(&control_file) else {
