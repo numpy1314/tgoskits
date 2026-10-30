@@ -158,10 +158,12 @@ pub(in crate::kvm) fn create_vcpu_file(
 
 #[cfg(target_arch = "aarch64")]
 pub(in crate::kvm) fn get_preferred_target(arg: usize) -> AxResult<isize> {
-    use kvm_uapi::arm64::KVM_ARM_TARGET_GENERIC_V8;
+    use kvm_uapi::arm64::{KVM_ARM_TARGET_GENERIC_V8, KVM_ARM_VCPU_PSCI_0_2};
 
     let mut bytes = [0u8; abi::KVM_ARM_VCPU_INIT_SIZE as usize];
     bytes[..4].copy_from_slice(&KVM_ARM_TARGET_GENERIC_V8.to_ne_bytes());
+    // Recommend a configuration that this control endpoint actually accepts.
+    bytes[4..8].copy_from_slice(&(1u32 << KVM_ARM_VCPU_PSCI_0_2).to_ne_bytes());
     api_control::copy_to_user(arg, &bytes)?;
     Ok(0)
 }
