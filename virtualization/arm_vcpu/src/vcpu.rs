@@ -195,6 +195,27 @@ impl axvcpu::AxArchVCpu for Aarch64VCpu {
 
 // Private function
 impl Aarch64VCpu {
+    /// Apply a queued PSCI CPU_ON reset to this vCPU's saved state.
+    ///
+    /// The caller must own the target vCPU outside guest execution. VM memory,
+    /// MPIDR, Stage-2 configuration, virtual-counter offset and queued VGIC
+    /// interrupts other than the reset timer outputs remain attached to this
+    /// vCPU. All ordinary guest registers,
+    /// FP/SIMD state and local timer programming start from reset values.
+    pub fn reset_guest_state(&mut self, pc: u64, arg: u64, be: bool) -> AxResult {
+        if pc & 3 != 0 {
+            return Err(ax_errno::AxError::InvalidInput);
+        }
+        self.virtual_gic_state.reset_timer_interrupts()?;
+        self.ctx = TrapFrame::default();
+        self.ctx.elr = pc;
+        self.ctx.gpr[0] = arg;
+        self.host_stack_top = 0;
+        self.guest_system_regs.reset_for_cpu_on(be);
+        *self.fp_state = FpState::default();
+        Ok(())
+    }
+
     fn init_hv(&mut self, config: Aarch64VCpuSetupConfig) {
         self.ctx.spsr = (SPSR_EL1::M::EL1h
             + SPSR_EL1::I::Masked

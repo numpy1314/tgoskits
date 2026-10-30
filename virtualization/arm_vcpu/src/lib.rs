@@ -25,6 +25,7 @@ mod context_frame;
 #[macro_use]
 mod exception_utils;
 mod exception;
+mod interrupt_reset;
 mod pcpu;
 mod smc;
 mod state;

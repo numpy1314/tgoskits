@@ -12,29 +12,59 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::arch::asm;
+//! Guest firmware-call admission. Guest arguments never invoke physical EL3.
 
-#[inline(never)]
-/// invoke a secure monitor call
-/// # Safety:
-/// It is unsafe to call this function directly.
-/// The caller must ensure that
-/// x0 is defined as the SMC function number referenced in the SMC Calling Convention
-/// than the args later must be valid for the specified SMC function.
-pub unsafe fn smc_call(x0: u64, x1: u64, x2: u64, x3: u64) -> (u64, u64, u64, u64) {
-    let r0;
-    let r1;
-    let r2;
-    let r3;
-    unsafe {
-        asm!(
-            "smc #0",
-            inout("x0") x0 => r0,
-            inout("x1") x1 => r1,
-            inout("x2") x2 => r2,
-            inout("x3") x3 => r3,
-            options(nomem, nostack)
-        );
-    }
-    (r0, r1, r2, r3)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FirmwareConduit {
+    Hvc,
+    Smc,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FirmwareAction {
+    Hypercall { nr: u64, args: [u64; 6] },
+    NotSupported,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct FirmwareCallPlan {
+    pub resume_pc: u64,
+    pub action: FirmwareAction,
+}
+
+/// PSCI uses the standard-service owner, including unimplemented function IDs.
+/// The shared PSCI decoder decides which exact IDs and versions are supported.
+fn is_psci_call(function: u64) -> bool {
+    (function as u32 >> 24) & 0x3f == 4
+}
+
+pub(crate) fn classify_firmware_call(
+    conduit: FirmwareConduit,
+    immediate: u16,
+    exception_pc: u64,
+    function: u64,
+    args: [u64; 6],
+) -> FirmwareCallPlan {
+    // HVC's ELR already points past the instruction. A trapped SMC's ELR
+    // points at the instruction, including when its immediate is invalid.
+    let resume_pc = match conduit {
+        FirmwareConduit::Hvc => exception_pc,
+        FirmwareConduit::Smc => exception_pc.wrapping_add(4),
+    };
+    let action = if conduit == FirmwareConduit::Smc && immediate != 0 {
+        FirmwareAction::NotSupported
+    } else if is_psci_call(function) {
+        FirmwareAction::Hypercall {
+            // SMCCC function IDs are 32-bit. Parameter narrowing belongs to
+            // the shared decoder so both frontends follow the same rule.
+            nr: function as u32 as u64,
+            args,
+        }
+    } else if conduit == FirmwareConduit::Hvc {
+        // Preserve the existing private hypercall namespace and arguments.
+        FirmwareAction::Hypercall { nr: function, args }
+    } else {
+        FirmwareAction::NotSupported
+    };
+    FirmwareCallPlan { resume_pc, action }
 }

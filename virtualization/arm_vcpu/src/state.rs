@@ -34,6 +34,21 @@ pub(crate) struct VirtualGicState {
 }
 
 impl VirtualGicState {
+    pub(crate) fn reset_timer_interrupts(&mut self) -> ax_errno::AxResult {
+        let priority_bits = ICH_VTR_EL2.read(ICH_VTR_EL2::PREBITS) + 1;
+        if crate::interrupt_reset::clear_timer_interrupts(
+            &mut self.list_registers,
+            &mut self.ap0r,
+            &mut self.ap1r,
+            self.vmcr,
+            priority_bits as u32,
+        ) {
+            Ok(())
+        } else {
+            Err(ax_errno::AxError::Unsupported)
+        }
+    }
+
     pub(crate) fn inject_interrupt(&mut self, vector: usize) -> bool {
         const LR_PENDING: u64 = 1 << 62;
         const LR_GROUP1: u64 = 1 << 60;
@@ -329,6 +344,21 @@ struct GuestTimerRegisters {
 }
 
 impl GuestSystemRegisters {
+    /// Reset an offline vCPU's EL1/EL0 state without changing its VM resources
+    /// or virtual-counter epoch. CPU_ON must not restart the VM-wide clock.
+    pub(crate) fn reset_for_cpu_on(&mut self, be: bool) {
+        *self = Self {
+            cntvoff_el2: self.cntvoff_el2,
+            cnthctl_el2: self.cnthctl_el2,
+            vmpidr_el2: self.vmpidr_el2,
+            hcr_el2: self.hcr_el2,
+            vttbr_el2: self.vttbr_el2,
+            vtcr_el2: self.vtcr_el2,
+            sctlr_el1: 0x30c5_0830 | if be { 1 << 25 } else { 0 },
+            ..Self::default()
+        };
+    }
+
     pub(crate) fn sp_el1(&self) -> u64 {
         self.sp_el1
     }
