@@ -18,6 +18,7 @@
 //! as `/dev/kvm`. The host adapter owns the OS file/device plumbing, while
 //! `axvisor-core` owns KVM command semantics and per-file state.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ax_errno::AxResult;
@@ -153,6 +154,30 @@ pub trait ControlIf {
     /// `KVM_SET_SIGNAL_MASK`. An empty slice asks the host to use the current thread's normal
     /// signal mask. The host must not consume a deliverable signal when reporting it here.
     fn current_thread_has_pending_signal(blocked_signals: &[u8]) -> AxResult<bool>;
+
+    /// Returns the current physical CPU. The caller must prevent migration
+    /// throughout publication and guest entry, not merely during this call.
+    #[cfg(target_arch = "aarch64")]
+    fn current_cpu_id() -> usize;
+
+    /// Forces `cpu` out of guest execution and waits for its host IPI handler.
+    /// Call with interrupts enabled and without holding Core locks. This does
+    /// not inject a guest interrupt or wait for the target KVM_RUN to return.
+    #[cfg(target_arch = "aarch64")]
+    fn kick_cpu_wait(cpu: usize) -> AxResult;
+
+    /// Interruptibly waits for a control predicate using the KVM signal mask.
+    /// `deadline` is an optional absolute host monotonic time in nanoseconds.
+    /// Returns true for the predicate, false for timeout, or Interrupted for
+    /// a deliverable signal. Predicate checking and queue notification must
+    /// not lose a wakeup. Generic synchronization waits retain their semantics.
+    #[cfg(target_arch = "aarch64")]
+    fn wait_control_until(
+        queue: usize,
+        condition: Box<dyn Fn() -> bool + Send + 'static>,
+        blocked_signals: &[u8],
+        deadline: Option<u64>,
+    ) -> AxResult<bool>;
 
     // Retained userspace address spaces and pinned pages.
 

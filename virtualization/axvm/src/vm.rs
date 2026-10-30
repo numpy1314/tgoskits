@@ -714,6 +714,59 @@ impl AxVM {
         }
     }
 
+    /// Runs an ARM control vCPU with a stop gate at every hardware entry.
+    /// Both callbacks execute in the bound, IRQ-off window. `leave` runs after
+    /// the backend has restored host state, including on a run error. The
+    /// static VM and x86 paths keep their existing entry policy.
+    #[cfg(target_arch = "aarch64")]
+    pub fn run_vcpu_raw_control<F, E, L>(
+        &self,
+        vcpu_id: usize,
+        mut external_page_fault_handler: F,
+        mut enter: E,
+        mut leave: L,
+    ) -> AxResult<AxVCpuExitReason>
+    where
+        F: FnMut(GuestPhysAddr, MappingFlags) -> AxResult<bool>,
+        E: FnMut() -> bool,
+        L: FnMut(),
+    {
+        let vcpu = self
+            .vcpu(vcpu_id)
+            .ok_or_else(|| ax_err_type!(InvalidInput, "Invalid vcpu_id"))?;
+        loop {
+            let exit_reason = Self::with_bound_vcpu(&vcpu, || {
+                vcpu.set_hlt_exiting(true)?;
+                for _ in 0..8 {
+                    if !enter() {
+                        return Ok(AxVCpuExitReason::Nothing);
+                    }
+                    let result = vcpu.run();
+                    leave();
+                    let exit_reason = result?;
+                    if !matches!(exit_reason, AxVCpuExitReason::Nothing) {
+                        return Ok(exit_reason);
+                    }
+                }
+                Ok(AxVCpuExitReason::Nothing)
+            })?;
+            match exit_reason {
+                AxVCpuExitReason::NestedPageFault { addr, access_flags } => {
+                    if external_page_fault_handler(addr, access_flags)?
+                        || self.handle_nested_page_fault(addr, access_flags)
+                    {
+                        continue;
+                    }
+                    return Ok(
+                        Self::with_bound_vcpu(&vcpu, || vcpu.decode_nested_page_fault())?
+                            .unwrap_or(AxVCpuExitReason::NestedPageFault { addr, access_flags }),
+                    );
+                }
+                exit_reason => return Ok(exit_reason),
+            }
+        }
+    }
+
     #[cfg(feature = "svm")]
     fn run_vcpu_raw_svm<F>(
         &self,
