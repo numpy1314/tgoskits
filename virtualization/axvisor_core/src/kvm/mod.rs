@@ -735,6 +735,7 @@ fn check_extension(capability: usize) -> usize {
         KVM_CAP_ARM_PSCI_0_2 => usize::from(cfg!(target_arch = "aarch64")),
         KVM_CAP_IOEVENTFD_ANY_LENGTH => 1,
         KVM_CAP_IMMEDIATE_EXIT => 1,
+        KVM_CAP_SYSTEM_EVENT_DATA => usize::from(cfg!(target_arch = "aarch64")),
         KVM_CAP_XSAVE2 => 0,
         _ => 0,
     }
